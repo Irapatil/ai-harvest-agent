@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     naukri_email:    str = ""
     naukri_password: str = ""
 
+    # ── Dice scraper (public board — credentials optional) ────────────────────────
+    dice_email:    str = ""
+    dice_password: str = ""
+
     # ── Storage ──────────────────────────────────────────────────────────────────
     storage_backend: Literal["local", "s3"] = "local"
     storage_local_dir: str = "./data/results"
