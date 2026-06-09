@@ -1,0 +1,50 @@
+# Environment & secrets
+.env
+.env.local
+*.env
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Session & credentials (sensitive runtime files)
+data/config/linkedin_session.json
+
+# Harvest results (generated data)
+data/results/
+
+# Debug screenshots / artifacts
+debug/
+
+# Logs
+*.log
+server.err
+server_stderr.log
+server_stdout.log
+
+# IDE / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3

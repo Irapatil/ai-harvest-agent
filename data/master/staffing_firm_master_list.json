@@ -1,0 +1,43 @@
+{
+  "_comment": "Known IT staffing and recruitment firms. Lowercase. Partial match is applied.",
+  "companies": [
+    "tcs", "tata consultancy", "infosys", "wipro", "hcl", "hcltech",
+    "tech mahindra", "cognizant", "capgemini", "accenture", "ibm",
+    "ntt data", "mphasis", "hexaware", "mindtree", "lti", "ltimindtree",
+    "coforge", "persistent", "cyient", "birlasoft", "mastech",
+    "randstad", "manpower", "manpowergroup", "adecco", "kelly services",
+    "kelly it", "rchilli", "quess", "teamlease", "spectraforce",
+    "igate", "patni", "rolta", "kpit", "sasken", "zensar",
+    "sonata software", "maq software", "trigent", "syntel",
+    "xoriant", "e-infochips", "sanmina", "jabil",
+    "niit technologies", "niit", "aptech",
+    "global logic", "globallogic", "harman", "belcan",
+    "tata elxsi", "quest global", "cyient",
+    "infosys bpm", "wipro bpm", "wns", "firstsource", "mphasis bpm",
+    "ecs", "3i infotech", "subex",
+    "incedo", "datamatics", "exlservice", "exl", "genpact",
+    "concentrix", "transcom", "teleperformance",
+    "icad", "igate mastech", "aegis", "hinduja",
+    "evosys", "ameyo", "neosoft", "ksolves", "indium software",
+    "valuelabs", "softcrylic", "speridian", "inforeliance",
+    "coda solutions", "sdlc partners", "solutioneers",
+    "talent500", "naukri.com", "monster", "shine",
+    "heidrick struggles", "spencer stuart", "korn ferry",
+    "michael page", "robert half", "hudson", "hays",
+    "allegis", "insight global", "staffmark", "volt",
+    "modis", "saic", "leidos", "booz allen",
+    "sparks group", "staffware", "hireminds",
+    "wipro staffing", "infosys staffing", "tcs staffing",
+    "antal international", "abc consultants", "mafoi",
+    "peoplematters", "ikya", "teamlease staffing",
+    "careernet", "ma foi randstad"
+  ],
+  "keywords": [
+    "staffing", "recruitment", "recruiter", "manpower", "placement",
+    "outsourcing", "consulting", "talent solutions", "workforce solutions",
+    "hr solutions", "staffing solutions", "it staffing", "tech staffing",
+    "executive search", "headhunting", "bpo", "kpo", "rpo",
+    "contract staffing", "permanent staffing", "temp staffing",
+    "payroll services", "employer of record", "eor"
+  ]
+}

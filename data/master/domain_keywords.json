@@ -1,0 +1,93 @@
+{
+  "Data Engineering": [
+    "data engineer", "data pipeline", "etl", "elt", "apache spark", "pyspark",
+    "hadoop", "kafka", "airflow", "databricks", "data warehouse", "data lake",
+    "dbt", "snowflake", "bigquery", "redshift", "hive", "sqoop", "flume", "nifi",
+    "data ingestion", "data orchestration", "data architecture", "data platform",
+    "medallion", "delta lake", "iceberg", "data mesh", "streaming", "batch pipeline",
+    "glue", "stitch", "fivetran", "prefect", "dagster", "meltano"
+  ],
+  "Data Science": [
+    "data scientist", "statistical", "predictive modeling", "sklearn", "scikit-learn",
+    "pandas", "numpy", "jupyter", "r programming", "statistical modeling",
+    "data analysis", "business intelligence", "visualization", "tableau", "power bi",
+    "looker", "qlik", "superset", "data analyst", "quantitative analyst",
+    "experimentation", "a/b testing", "feature engineering", "model training",
+    "regression", "classification", "clustering", "time series", "forecasting"
+  ],
+  "AI/ML": [
+    "artificial intelligence", "ai engineer", "ml engineer", "machine learning engineer",
+    "deep learning", "neural network", "nlp", "natural language processing",
+    "computer vision", "pytorch", "tensorflow", "keras", "generative ai", "genai",
+    "llm", "large language model", "transformer", "bert", "gpt", "stable diffusion",
+    "reinforcement learning", "langchain", "rag", "vector database", "embeddings",
+    "fine tuning", "prompt engineering", "mlops", "model deployment", "triton",
+    "hugging face", "openai", "anthropic", "multimodal", "diffusion model"
+  ],
+  "SAP": [
+    "sap", "s/4hana", "s4hana", "sap ecc", "sap abap", "sap fi", "sap co",
+    "sap mm", "sap sd", "sap pp", "sap hr", "sap hcm", "sap wm", "sap ewm",
+    "sap scm", "sap bw", "sap bw4hana", "sap hana", "sap fiori", "sap basis",
+    "sap security", "sap crm", "sap ariba", "sap successfactors", "sap concur",
+    "sap analytics cloud", "sap datasphere", "sap fico", "sap consultant",
+    "sap functional", "sap technical", "sap integration", "sap middleware"
+  ],
+  "Cloud": [
+    "cloud engineer", "cloud architect", "aws", "azure", "gcp", "google cloud",
+    "cloud devops", "kubernetes", "k8s", "docker", "terraform", "ansible",
+    "cloudformation", "eks", "aks", "gke", "lambda", "ec2", "s3", "azure devops",
+    "site reliability", "sre", "cloud native", "microservices", "service mesh",
+    "istio", "helm", "argocd", "gitops", "infrastructure as code", "iac",
+    "cloud migration", "cloud security", "devops", "devsecops", "platform engineering",
+    "openshift", "rancher", "vault", "consul"
+  ],
+  "Digital": [
+    "digital transformation", "digital strategy", "e-commerce", "ecommerce",
+    "product manager", "product owner", "scrum master", "agile coach",
+    "growth hacking", "seo", "sem", "digital marketing", "crm", "salesforce",
+    "hubspot", "martech", "ad tech", "programmatic", "customer journey",
+    "omnichannel", "digital commerce", "content management", "cms", "drupal",
+    "wordpress", "shopify", "magento", "product analytics", "mixpanel", "amplitude",
+    "digital operations", "rpa", "robotic process automation", "uipath", "automation anywhere"
+  ],
+  "UX/UI": [
+    "ux designer", "ui designer", "user experience", "user interface",
+    "figma", "sketch", "adobe xd", "invision", "wireframe", "prototype",
+    "interaction design", "visual design", "product design", "design system",
+    "accessibility", "wcag", "usability testing", "information architecture",
+    "design thinking", "human computer interaction", "hci", "motion design",
+    "brand design", "typography", "color theory", "responsive design",
+    "mobile design", "design ops", "ux research", "user research"
+  ],
+  "ERP": [
+    "erp", "enterprise resource planning", "oracle erp", "oracle fusion",
+    "microsoft dynamics", "dynamics 365", "dynamics ax", "dynamics nav",
+    "netsuite", "workday", "infor", "epicor", "sage", "odoo", "ifs",
+    "erp implementation", "erp consultant", "functional consultant",
+    "erp migration", "erp integration", "erp customization", "oracle cloud",
+    "jd edwards", "peoplesoft", "oracle hcm", "oracle scm", "oracle financials",
+    "syspro", "ramco", "mfgpro"
+  ],
+  "Cyber Security": [
+    "cybersecurity", "cyber security", "information security", "infosec",
+    "penetration testing", "pen test", "ethical hacking", "soc analyst",
+    "security analyst", "vulnerability assessment", "threat intelligence",
+    "devsecops", "siem", "splunk", "firewall", "network security",
+    "endpoint security", "identity access management", "iam", "pam",
+    "zero trust", "cissp", "ceh", "cism", "oscp", "cloud security",
+    "application security", "appsec", "security operations", "incident response",
+    "forensics", "red team", "blue team", "purple team", "owasp",
+    "compliance", "gdpr", "iso 27001", "nist", "soc 2"
+  ],
+  "Infrastructure": [
+    "infrastructure engineer", "systems administrator", "sysadmin",
+    "network engineer", "linux administrator", "windows server",
+    "vmware", "vsphere", "cisco", "storage engineer", "backup",
+    "disaster recovery", "active directory", "ldap", "dns", "dhcp",
+    "load balancer", "nginx", "haproxy", "monitoring", "nagios",
+    "zabbix", "grafana", "prometheus", "datadog", "new relic",
+    "network operations", "noc", "it support", "server administration",
+    "hardware", "data center", "rack", "switching", "routing", "bgp",
+    "mpls", "sd-wan", "fortinet", "palo alto", "checkpoint"
+  ]
+}

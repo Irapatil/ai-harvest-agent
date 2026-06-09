@@ -1,0 +1,48 @@
+{
+  "_comment": "Hard qualification rules for UK Java contract roles.",
+
+  "confidence": {
+    "min_score": 0.5
+  },
+
+  "employment_type": {
+    "allowed": ["contract", "freelance"],
+    "reject_not_specified": true
+  },
+
+  "work_mode": {
+    "allowed": ["remote", "hybrid"],
+    "reject_not_specified": false
+  },
+
+  "location": {
+    "must_contain_any": ["London", "Manchester", "Birmingham", "Leeds",
+                         "UK", "United Kingdom", "Remote"],
+    "case_sensitive": false,
+    "skip_if_remote": true
+  },
+
+  "salary": {
+    "min_value": 400,
+    "period": "daily",
+    "currency": "GBP",
+    "reject_if_missing": false
+  },
+
+  "skills": {
+    "must_have_any": ["Java", "Kotlin", "Scala"],
+    "must_have_all": [],
+    "must_not_have_any": ["COBOL", "RPG", "VBA"],
+    "search_in": "all"
+  },
+
+  "experience": {
+    "max_years_required": 15
+  },
+
+  "title": {
+    "must_contain_any": ["Java", "Backend", "Engineer", "Developer", "Architect", "Consultant"],
+    "must_not_contain_any": ["Junior", "Graduate", "Trainee", "Apprentice"],
+    "case_sensitive": false
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "sources": {
+    "linkedin": true,
+    "naukri": true,
+    "dice": false
+  },
+  "filters": {
+    "keyword": "",
+    "location": "",
+    "job_type": "Any",
+    "work_mode": "Any",
+    "search_window_hours": 24,
+    "max_jobs": 50,
+    "domain": "Any",
+    "hiring_entity": "Any",
+    "gcc_mode": "include_gcc",
+    "salary_min": null,
+    "salary_max": null,
+    "salary_currency": "INR",
+    "include_undisclosed_salary": true,
+    "verification": {
+      "enabled": false,
+      "method": "career_page",
+      "on_mismatch": "flag",
+      "on_not_found": "flag"
+    }
+  },
+  "schedule": {
+    "frequency": "daily",
+    "run_time": "09:00",
+    "timezone": "Asia/Kolkata",
+    "enabled": false
+  },
+  "browser": {
+    "headless": false,
+    "slow_mo_ms": 0
+  }
+}
