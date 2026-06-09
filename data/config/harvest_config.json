@@ -2,13 +2,13 @@
   "sources": {
     "linkedin": true,
     "naukri": true,
-    "dice": false
+    "dice": true
   },
   "filters": {
-    "keyword": "",
-    "location": "",
+    "keyword": "AI Engineer",
+    "location": "India",
     "job_type": "Any",
-    "work_mode": "Any",
+    "work_mode": "Remote",
     "search_window_hours": 24,
     "max_jobs": 50,
     "domain": "Any",

@@ -61,74 +61,69 @@ class DiceScrapedJob:
 
 
 class _Sel:
+    # Current Dice DOM uses div[data-testid="job-card"] (React SPA, no web components)
     CARD: list[str] = [
-        "dhi-search-card",
-        "[data-cy='search-result']",
-        "li[class*='search-result']",
-        "[data-testid='job-card']",
-        "article[class*='card']",
+        "div[data-testid='job-card']",
         "div[data-id]",
+        "dhi-search-card",             # legacy fallback
+        "[data-cy='search-result']",
+        "article[class*='card']",
     ]
+    # Visible title link — NOT the invisible opacity-0 overlay link
     TITLE: list[str] = [
+        "a[data-testid='job-search-job-detail-link']",
         "a[data-cy='title-link']",
         "a[id$='-title']",
-        "a[href*='/job-detail/']",
         "h5 a",
         "h4 a",
         "[data-testid='title'] a",
     ]
     COMPANY: list[str] = [
+        "a[href*='/company-profile/'] p",
         "a.company-header-link",
         "a[data-cy='company']",
         "[data-testid='company-name']",
+        "a[href*='/employer/'] p",
         "span[class*='company']",
-        "a[href*='/employer/']",
-        "[class*='company-link']",
     ]
     LOCATION: list[str] = [
+        "div[role='main'] span p.text-sm",
         "span.search-result-location",
         "[data-testid='location']",
         "p[class*='location']",
         "span[class*='location']",
-        "li[class*='location']",
     ]
     POSTED: list[str] = [
         "span.posted-date",
         "[data-testid='date']",
         "span[class*='posted']",
         "time",
-        "relative-time",
     ]
     EMP_TYPE: list[str] = [
         "li[data-testid='employment-type']",
         "span[data-testid='employmentType']",
         "span[class*='employment']",
-        "button[class*='chip'][class*='employ']",
     ]
     WORK_TYPE: list[str] = [
         "li[data-testid='workplace-type']",
         "span[data-testid='workplaceType']",
         "span[class*='workplace']",
         "span[class*='remote']",
-        "button[class*='chip'][class*='work']",
     ]
     DESC: list[str] = [
+        "div[role='main'] p",
         "div.job-search-preview p",
         "[data-testid='job-description']",
-        "div[class*='description'] p",
         "span[class*='description']",
-        "p[class*='snippet']",
     ]
     SKILLS: list[str] = [
         "button.skill-chip",
         "span.skill-chip",
-        "li.skill-chip",
         "[class*='skill-chip']",
-        "[class*='skill'] span",
     ]
     LINK: list[str] = [
+        "a[data-testid='job-search-job-detail-link']",
         "a[data-cy='title-link']",
-        "a[id$='-title']",
         "a[href*='/job-detail/']",
     ]
     CONTAINER: list[str] = [
@@ -147,9 +142,12 @@ class _Sel:
     ]
     COOKIE: list[str] = [
         "button#onetrust-accept-btn-handler",
+        "button:has-text('Allow all')",
+        "button:has-text('Allow All')",
         "button:has-text('Accept All')",
         "button:has-text('Accept Cookies')",
         "button:has-text('I Accept')",
+        "button:has-text('Agree')",
     ]
     MODAL: list[str] = [
         "button[aria-label='Close']",
@@ -328,7 +326,12 @@ class DiceScraper:
             logger.warning("dice_no_cards_found_falling_back_to_js")
             return await self._js_extract_jobs(remaining, seen_urls)
 
-        return await self._parse_card_elements(raw, remaining, seen_urls)
+        parsed = await self._parse_card_elements(raw, remaining, seen_urls)
+        if not parsed:
+            # Cards found but all failed CSS extraction — likely Shadow DOM; use JS path
+            logger.warning("dice_css_parse_empty_falling_back_to_js", cards=len(raw))
+            return await self._js_extract_jobs(remaining, seen_urls)
+        return parsed
 
     async def paginate(self, current_page: int) -> bool:
         """
@@ -452,16 +455,34 @@ class DiceScraper:
         for sel in _Sel.COOKIE:
             try:
                 el = self._page.locator(sel).first
-                if await el.is_visible(timeout=400):
+                if await el.is_visible(timeout=2_000):
                     await el.click()
-                    await _delay(self._page, 200, 350)
+                    await _delay(self._page, 300, 500)
                     break
             except Exception:
                 continue
+        # JS fallback: click any visible "Allow all" / "Accept" button in cookie banners
+        try:
+            await self._page.evaluate("""
+                () => {
+                    const patterns = ['Allow all', 'Allow All', 'Accept All', 'Accept Cookies', 'I Accept', 'Agree'];
+                    for (const btn of document.querySelectorAll('button')) {
+                        const txt = btn.textContent.trim();
+                        if (patterns.some(p => txt.toLowerCase() === p.toLowerCase())) {
+                            btn.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            """)
+            await _delay(self._page, 300, 500)
+        except Exception:
+            pass
         for sel in _Sel.MODAL:
             try:
                 el = self._page.locator(sel).first
-                if await el.is_visible(timeout=300):
+                if await el.is_visible(timeout=500):
                     await el.click()
                     await _delay(self._page, 200, 350)
                     break
@@ -568,74 +589,86 @@ class DiceScraper:
         remaining: int,
         seen_urls: set[str] | None = None,
     ) -> list[DiceScrapedJob]:
-        """JavaScript fallback: find all /job-detail/ links and extract card data."""
+        """JavaScript extraction using confirmed Dice DOM structure (div[data-testid='job-card'])."""
         logger.info("dice_js_extraction_started")
         if seen_urls is None:
             seen_urls = set()
         try:
             raw_jobs: list[dict] = await self._page.evaluate("""
                 () => {
-                    function getText(el, sels) {
+                    function getText(root, sels) {
                         for (const s of sels) {
                             try {
-                                const found = el.querySelector(s);
+                                const found = root.querySelector(s);
                                 if (found && found.textContent.trim())
                                     return found.textContent.trim();
                             } catch(e) {}
                         }
                         return '';
                     }
-                    function getAttr(el, sels, attr) {
-                        for (const s of sels) {
-                            try {
-                                const found = el.querySelector(s);
-                                if (found) {
-                                    const v = found.getAttribute(attr);
-                                    if (v) return v.trim();
-                                }
-                            } catch(e) {}
-                        }
-                        return '';
+
+                    // Current Dice DOM: cards are div[data-testid="job-card"]
+                    // Visible title link: a[data-testid="job-search-job-detail-link"]
+                    // Invisible overlay link: a[data-testid="job-search-job-card-link"] (opacity-0, empty text)
+                    let cards = Array.from(document.querySelectorAll('div[data-testid="job-card"]'));
+                    if (cards.length === 0) {
+                        cards = Array.from(document.querySelectorAll('div[data-id]'));
+                    }
+                    if (cards.length === 0) {
+                        // Legacy fallback: find all visible title links and walk up
+                        cards = Array.from(document.querySelectorAll('a[data-testid="job-search-job-detail-link"]'))
+                                     .map(a => { let el = a; for (let i=0;i<8;i++) { if (!el.parentElement) break; el=el.parentElement; if (el.getAttribute && el.getAttribute('data-testid')==='job-card') break; } return el; });
                     }
 
-                    const anchors = Array.from(document.querySelectorAll('a[href*="/job-detail/"]'));
                     const seen = new Set();
                     const results = [];
-                    for (const a of anchors) {
-                        const rawUrl = a.href || '';
+
+                    for (const card of cards) {
+                        // Visible title link (has actual text content)
+                        const titleEl = card.querySelector('a[data-testid="job-search-job-detail-link"]')
+                                     || card.querySelector('a[aria-label]:not([tabindex="-1"])');
+                        if (!titleEl) continue;
+
+                        const rawUrl = titleEl.href || titleEl.getAttribute('href') || '';
                         const url = rawUrl.split('?')[0];
                         if (!url || seen.has(url)) continue;
                         seen.add(url);
 
-                        let card = a;
-                        for (let i = 0; i < 8; i++) {
-                            const p = card.parentElement;
-                            if (!p) break;
-                            card = p;
-                            const tag = card.tagName;
-                            const cls = card.className || '';
-                            if (tag === 'ARTICLE' || tag === 'LI') break;
-                            if (/card|result|tuple/i.test(cls)) break;
-                            if (card.tagName.toLowerCase() === 'dhi-search-card') break;
+                        // Title: from element text or aria-label (strip parenthetical ID)
+                        let title = titleEl.textContent.trim();
+                        if (!title || title.length < 3) {
+                            const al = titleEl.getAttribute('aria-label') || '';
+                            const m = al.match(/^View Details for (.+?)\\s*\\([^)]+\\)$/);
+                            title = m ? m[1] : al.replace(/^View Details for /i, '').trim();
                         }
-
-                        const title = a.textContent.trim() ||
-                            getText(card, ['h5 a', 'h4 a', '[data-testid="title"] a']);
                         if (!title || title.length < 3) continue;
+
+                        // Company: link inside .logo span or company-profile link
+                        const companyEl = card.querySelector('a[href*="/company-profile/"] p')
+                                       || card.querySelector('a[href*="/company-profile/"]');
+                        const company = companyEl ? companyEl.textContent.trim() : '';
+
+                        // Location & posted: small grey text paragraphs in div[role="main"]
+                        const metaPs = Array.from(card.querySelectorAll('div[role="main"] span p, div[role="main"] p'))
+                                            .map(p => p.textContent.trim()).filter(t => t && t !== '•');
+                        const location = metaPs[0] || '';
+                        const posted   = metaPs[1] || '';
+
+                        // Description: first non-empty paragraph in content area
+                        const desc = getText(card, ['div[role="main"] p', 'div.job-search-preview p', 'span[class*="description"]']);
 
                         results.push({
                             url,
                             title,
-                            company:     getText(card, ['a.company-header-link','a[data-cy="company"]','[data-testid="company-name"]','span[class*="company"]']),
-                            location:    getText(card, ['span.search-result-location','[data-testid="location"]','span[class*="location"]']),
-                            posted:      getText(card, ['span.posted-date','[data-testid="date"]','span[class*="posted"]','time']),
-                            emp_type:    getText(card, ['[data-testid="employmentType"]','span[class*="employment"]']),
-                            work_type:   getText(card, ['[data-testid="workplaceType"]','span[class*="workplace"]','span[class*="remote"]']),
-                            description: getText(card, ['div.job-search-preview p','span[class*="description"]','p[class*="snippet"]']),
-                            skills:      Array.from(card.querySelectorAll('button.skill-chip, span.skill-chip, [class*="skill-chip"]'))
-                                              .map(e => e.textContent.trim()).filter(Boolean),
+                            company,
+                            location,
+                            posted,
+                            emp_type:    '',
+                            work_type:   location,
+                            description: desc,
+                            skills:      [],
                         });
-                        if (results.length >= 50) break;
+                        if (results.length >= 200) break;
                     }
                     return results;
                 }
