@@ -8,7 +8,7 @@ run()       Legacy interface — used by /run-harvest and the scheduler.
 
 run_all()   Full pipeline — used by POST /run-harvest-agent.
             Executes sources in priority order, applies business filters,
-            runs optional verification, returns OrchestratorResult.
+            deduplicates cross-source, returns OrchestratorResult.
 
 Source priority (fixed):
   1. Naukri
@@ -24,8 +24,11 @@ To add a new source (e.g. Indeed):
 """
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 import structlog
 
@@ -40,7 +43,52 @@ from app.models.response_models import HarvestJob
 from app.models.unified_job import UnifiedJob
 from app.services.business_filter_service import BusinessFilterService
 
+_COMBINED_DIR = Path("data/results/combined")
+
 logger = structlog.get_logger(__name__)
+
+
+def _deduplicate(jobs: list[UnifiedJob]) -> list[UnifiedJob]:
+    """Remove duplicates across all sources by job_url, then company+title."""
+    seen_urls: set[str] = set()
+    seen_ct:   set[str] = set()
+    deduped:   list[UnifiedJob] = []
+    for job in jobs:
+        url_key = job.job_url.split("?")[0].rstrip("/").lower() if job.job_url else ""
+        ct_key  = (
+            re.sub(r"\s+", " ", job.company.lower().strip())
+            + "::"
+            + re.sub(r"\s+", " ", job.job_title.lower().strip())
+        )
+        if (url_key and url_key in seen_urls) or ct_key in seen_ct:
+            continue
+        if url_key:
+            seen_urls.add(url_key)
+        seen_ct.add(ct_key)
+        deduped.append(job)
+    return deduped
+
+
+def _save_combined(
+    run_id:       str,
+    executed_at:  str,
+    jobs:         list[UnifiedJob],
+    filters_snap: dict,
+) -> str:
+    """Save all deduplicated jobs to data/results/combined/YYYYMMDD_combined.json."""
+    _COMBINED_DIR.mkdir(parents=True, exist_ok=True)
+    ts      = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    path    = _COMBINED_DIR / f"{ts}_combined.json"
+    payload = {
+        "run_id":      run_id,
+        "executed_at": executed_at,
+        "total_found": len(jobs),
+        "sources":     list({j.source for j in jobs}),
+        "filters":     filters_snap,
+        "jobs":        [j.to_dict() for j in jobs],
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return str(path.resolve())
 
 # Fixed execution priority — lower index = runs first
 _SOURCE_PRIORITY = ["naukri", "linkedin", "dice"]
@@ -109,6 +157,7 @@ class OrchestratorResult:
     all_jobs:         list[UnifiedJob]            = field(default_factory=list)
     started_at:       datetime                    = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at:     datetime                    = field(default_factory=lambda: datetime.now(timezone.utc))
+    combined_path:    str                         = ""
 
     @property
     def total_jobs(self) -> int:
@@ -164,11 +213,13 @@ class OrchestratorAgent:
     async def run_all(self) -> OrchestratorResult:
         """
         Execute all enabled sources in priority order, apply business filters,
-        run optional company verification, and return OrchestratorResult.
+        deduplicate cross-source, save combined results, and return OrchestratorResult.
         """
-        config     = self._config
-        started_at = datetime.now(timezone.utc)
-        result     = OrchestratorResult(started_at=started_at)
+        config      = self._config
+        started_at  = datetime.now(timezone.utc)
+        executed_at = started_at.isoformat()
+        run_id      = started_at.strftime("%Y%m%d_%H%M%S")
+        result      = OrchestratorResult(started_at=started_at)
 
         # ── Step 1: collect raw jobs from all enabled sources ─────────────────
         raw_by_source = await self._collect_all(config)
@@ -187,7 +238,14 @@ class OrchestratorAgent:
         all_unified = svc.classify_all(all_unified, config.filters)
         all_unified = svc.apply_all(all_unified, config.filters)
 
-        logger.info("orchestrator_filtered_total", total=len(all_unified))
+        logger.info(
+            "classification_completed",
+            total         = len(all_unified),
+            direct_client = sum(1 for j in all_unified if j.hiring_entity == "Direct Client"),
+            gcc           = sum(1 for j in all_unified if j.hiring_entity == "GCC"),
+            staffing_firm = sum(1 for j in all_unified if j.hiring_entity == "Staffing Firm"),
+            ambiguous     = sum(1 for j in all_unified if j.hiring_entity == "Ambiguous"),
+        )
 
         # ── Step 4: company verification (optional) ───────────────────────────
         if config.filters.verification.enabled:
@@ -195,14 +253,41 @@ class OrchestratorAgent:
             verifier    = VerificationAgent(config.filters.verification, headless=True)
             all_unified = await verifier.verify_batch(all_unified)
 
+        # ── Step 5: cross-source deduplication ────────────────────────────────
+        before_dedup = len(all_unified)
+        all_unified  = _deduplicate(all_unified)
+        removed      = before_dedup - len(all_unified)
+        logger.info(
+            "deduplication_completed",
+            before  = before_dedup,
+            after   = len(all_unified),
+            removed = removed,
+        )
+
+        # ── Step 6: rebuild jobs_by_source from deduped set ───────────────────
+        deduped_by_source: dict[str, list[UnifiedJob]] = {}
+        for job in all_unified:
+            deduped_by_source.setdefault(job.source, []).append(job)
+        result.jobs_by_source = deduped_by_source
+
+        # ── Step 7: save combined JSON ────────────────────────────────────────
+        filters_snap  = config.filters.model_dump() if hasattr(config.filters, "model_dump") else {}
+        combined_path = _save_combined(run_id, executed_at, all_unified, filters_snap)
+        logger.info("json_saved", path=combined_path, total=len(all_unified))
+
         result.all_jobs      = all_unified
+        result.combined_path = combined_path
         result.completed_at  = datetime.now(timezone.utc)
 
+        elapsed = (result.completed_at - started_at).total_seconds()
         logger.info(
-            "orchestrator_run_all_complete",
-            sources   = result.sources_executed,
-            total     = result.total_jobs,
-            verified  = result.verified_jobs,
+            "harvest_completed",
+            run_id   = run_id,
+            sources  = result.sources_executed,
+            total    = result.total_jobs,
+            verified = result.verified_jobs,
+            elapsed  = round(elapsed, 1),
+            path     = combined_path,
         )
         return result
 

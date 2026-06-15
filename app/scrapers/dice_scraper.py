@@ -392,6 +392,18 @@ class DiceScraper:
         safety_cap:  int                  = self._filters.max_jobs if self._filters.max_jobs > 0 else 5_000
         empty_pages: int                  = 0
 
+        logger.info(
+            "search_started",
+            source      = "dice",
+            keyword     = self._filters.keyword,
+            location    = self._filters.location,
+            job_type    = self._filters.job_type,
+            work_mode   = self._filters.work_mode,
+            max_jobs    = self._filters.max_jobs,
+            search_window_hours = self._filters.search_window_hours,
+        )
+        logger.info("pagination_started", source="dice", safety_cap=safety_cap)
+
         while len(all_jobs) < safety_cap:
             try:
                 await self.search_jobs(page_num)
@@ -422,6 +434,7 @@ class DiceScraper:
                         all_jobs.append(j)
 
             logger.info("dice_page_done", page=page_num, page_new=len(page_jobs), total=len(all_jobs))
+            logger.info("page_processed", source="dice", page=page_num, jobs_this_page=len(page_jobs), total_collected=len(all_jobs))
 
             if not await self.paginate(page_num):
                 break
@@ -430,6 +443,7 @@ class DiceScraper:
             await _delay(self._page, 400, 700)
 
         logger.info("dice_harvest_complete", pages=page_num, total=len(all_jobs))
+        logger.info("jobs_found", source="dice", total=len(all_jobs))
         return all_jobs
 
     # ── Private helpers ────────────────────────────────────────────────────────
@@ -452,23 +466,33 @@ class DiceScraper:
         return f"{_DICE_SEARCH_URL}?{qs}" if qs else _DICE_SEARCH_URL
 
     async def _dismiss_overlays(self) -> None:
+        # ── Step 1: ConsentManager / cookie consent ────────────────────────────
+        # Wait up to 5 s for the banner to appear (loaded async from external CDN)
         for sel in _Sel.COOKIE:
             try:
                 el = self._page.locator(sel).first
-                if await el.is_visible(timeout=2_000):
+                if await el.is_visible(timeout=5_000):
                     await el.click()
-                    await _delay(self._page, 300, 500)
+                    await _delay(self._page, 600, 900)
+                    logger.debug("dice_cookie_dismissed", selector=sel)
                     break
             except Exception:
                 continue
-        # JS fallback: click any visible "Allow all" / "Accept" button in cookie banners
+
+        # JS fallback — handles ConsentManager injected UI and shadow DOM
         try:
-            await self._page.evaluate("""
+            clicked = await self._page.evaluate("""
                 () => {
-                    const patterns = ['Allow all', 'Allow All', 'Accept All', 'Accept Cookies', 'I Accept', 'Agree'];
+                    // ConsentManager-specific accept button classes
+                    const cmpBtns = document.querySelectorAll(
+                        '.cmpboxbtnyes, .cmp-accept-btn, [class*="cmpbtnyes"], [id*="cmpbntyesall"]'
+                    );
+                    for (const b of cmpBtns) { b.click(); return true; }
+
+                    // Generic text patterns
+                    const patterns = ['allow all', 'accept all', 'accept cookies', 'i accept', 'agree', 'ok'];
                     for (const btn of document.querySelectorAll('button')) {
-                        const txt = btn.textContent.trim();
-                        if (patterns.some(p => txt.toLowerCase() === p.toLowerCase())) {
+                        if (patterns.includes(btn.textContent.trim().toLowerCase())) {
                             btn.click();
                             return true;
                         }
@@ -476,22 +500,46 @@ class DiceScraper:
                     return false;
                 }
             """)
-            await _delay(self._page, 300, 500)
+            if clicked:
+                await _delay(self._page, 600, 900)
         except Exception:
             pass
+
+        # ── Step 2: Dice login modal / any dialog overlay ─────────────────────
+        # Dice.com shows a "Make your next move" login overlay on search pages
+        # when unauthenticated. Close it if present.
+        try:
+            await self._page.evaluate("""
+                () => {
+                    // Try close / dismiss buttons on overlays
+                    const closeSels = [
+                        'button[aria-label="Close"]', 'button[aria-label="close"]',
+                        'button.modal-close', '[data-dismiss="modal"]',
+                    ];
+                    for (const sel of closeSels) {
+                        const el = document.querySelector(sel);
+                        if (el) { el.click(); return true; }
+                    }
+                    return false;
+                }
+            """)
+        except Exception:
+            pass
+
         for sel in _Sel.MODAL:
             try:
                 el = self._page.locator(sel).first
-                if await el.is_visible(timeout=500):
+                if await el.is_visible(timeout=800):
                     await el.click()
-                    await _delay(self._page, 200, 350)
+                    await _delay(self._page, 300, 500)
                     break
             except Exception:
                 continue
+
+        # Escape key dismisses most overlay dialogs
         try:
-            if await self._page.locator('div[role="dialog"]').first.is_visible(timeout=300):
-                await self._page.keyboard.press("Escape")
-                await _delay(self._page, 200, 400)
+            await self._page.keyboard.press("Escape")
+            await _delay(self._page, 300, 500)
         except Exception:
             pass
 

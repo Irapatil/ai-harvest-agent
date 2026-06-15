@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     linkedin_headless:                   bool = True
     linkedin_email:                      str = ""
     linkedin_password:                   str = ""
+    # If the LinkedIn account uses Microsoft/Google SSO, set these separately.
+    # Leave blank to fall back to linkedin_email / linkedin_password.
+    microsoft_email:    str = ""
+    microsoft_password: str = ""
 
     # ── Naukri scraper ────────────────────────────────────────────────────────────
     naukri_email:    str = ""

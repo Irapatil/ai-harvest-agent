@@ -31,9 +31,8 @@ from urllib.parse import urlencode
 import structlog
 from playwright.async_api import ElementHandle, Page
 
-from app.config import get_settings
 from app.models.harvest_models import FiltersConfig
-from app.scrapers.browser_manager import BrowserManager
+from app.scrapers.browser_manager import PersistentBrowserManager
 
 logger = structlog.get_logger(__name__)
 
@@ -58,8 +57,12 @@ _DATE_MAP: dict[int, str] = {
     720: "30",
 }
 
-_NAUKRI_LOGIN_URL        = "https://www.naukri.com/employer-login"
-_NAUKRI_LOGIN_URL_SEEKER = "https://www.naukri.com/nlogin/login"   # job-seeker fallback
+# recruit.naukri.com → redirects to /recruit/login?msg=TO&URL=recruit.naukri.com
+# Clicking the "Register/Log in" tab switches to the login form.
+# NOTE: Naukri now requires "Naukri Launcher" app for recruiter login —
+#       automated login will fail; agent falls back to guest/public search.
+_NAUKRI_LOGIN_URL        = "https://recruit.naukri.com/"
+_NAUKRI_LOGIN_URL_SEEKER = "https://www.naukri.com/nlogin/login"   # seeker/public fallback
 _NAUKRI_SEARCH_URL       = "https://www.naukri.com/jobs-in-india"
 
 
@@ -317,16 +320,16 @@ async def _all_texts(root: Page | ElementHandle, selectors: list[str]) -> list[s
 
 class NaukriAgent:
     """
-    Autonomous Naukri.com job harvester.
+    Naukri.com job harvester using a persistent Chrome profile session.
 
-    Instantiate fresh for each run — it does not hold browser state.
-    The BrowserManager is created and destroyed inside `harvest()`.
+    No login automation — the user logs in once via POST /naukri-setup-session
+    and the Chrome profile directory persists the session for all future runs.
+
+    Instantiate fresh for each run.
     """
 
     def __init__(self) -> None:
-        cfg = get_settings()
-        self._email:    str = cfg.naukri_email
-        self._password: str = cfg.naukri_password
+        pass
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -337,22 +340,28 @@ class NaukriAgent:
         slow_mo:  int  = 0,
     ) -> list[NaukriScrapedJob]:
         """
-        Login to Naukri, search jobs with all config filters, extract and return cards.
-
-        Returns a deduplicated list[NaukriScrapedJob].
-        Never raises — errors are logged and an empty list is returned.
+        Open Naukri with the persistent Chrome profile and harvest jobs
+        matching filters.  Returns [] if the profile is not authenticated.
         """
+        from app.services.config_service import ConfigService
+        chrome_profile = ConfigService().load().browser.chrome_profile
+
         logger.info(
             "naukri_search_started",
-            keyword   = filters.keyword,
-            location  = filters.location,
-            job_type  = filters.job_type,
-            work_mode = filters.work_mode,
-            max_jobs  = filters.max_jobs,
+            keyword        = filters.keyword,
+            location       = filters.location,
+            job_type       = filters.job_type,
+            work_mode      = filters.work_mode,
+            max_jobs       = filters.max_jobs,
+            chrome_profile = chrome_profile,
         )
         try:
-            async with BrowserManager(headless=headless, slow_mo=slow_mo) as bm:
-                page = await bm.new_page()
+            async with PersistentBrowserManager(
+                profile_dir = chrome_profile,
+                headless    = headless,
+                slow_mo     = slow_mo,
+            ) as pbm:
+                page = await pbm.new_page()
                 jobs = await self._run(page, filters)
             logger.info("naukri_jobs_extracted", total=len(jobs))
             return jobs
@@ -363,14 +372,7 @@ class NaukriAgent:
     # ── Internal flow ──────────────────────────────────────────────────────────
 
     async def _run(self, page: Page, f: FiltersConfig) -> list[NaukriScrapedJob]:
-        # ── Step 0: Login ─────────────────────────────────────────────────────
-        if self._email and self._password:
-            try:
-                await self._login(page)
-                await _delay(page, 1_500, 2_500)
-            except RuntimeError as exc:
-                logger.warning("naukri_login_skipped_proceeding_as_guest", reason=str(exc))
-
+        """Navigate directly to Naukri search — no login step."""
         return await self._paginate_and_collect(page, f)
 
     async def _paginate_and_collect(
@@ -389,6 +391,18 @@ class NaukriAgent:
         page_num:    int                    = 1   # Naukri pages are 1-indexed
         safety_cap:  int                    = f.max_jobs if f.max_jobs > 0 else 5_000
         empty_pages: int                    = 0
+
+        logger.info(
+            "search_started",
+            source      = "naukri",
+            keyword     = f.keyword,
+            location    = f.location,
+            job_type    = f.job_type,
+            work_mode   = f.work_mode,
+            max_jobs    = f.max_jobs,
+            search_window_hours = f.search_window_hours,
+        )
+        logger.info("pagination_started", source="naukri", safety_cap=safety_cap)
 
         while len(all_jobs) < safety_cap:
             search_url = self._build_search_url(f, page_no=page_num)
@@ -439,86 +453,14 @@ class NaukriAgent:
                         all_jobs.append(j)
 
             logger.info("naukri_page_done", page=page_num, page_new=len(page_jobs), total=len(all_jobs))
+            logger.info("page_processed", source="naukri", page=page_num, jobs_this_page=len(page_jobs), total_collected=len(all_jobs))
             page_num += 1
             await _delay(page, 400, 700)
 
         logger.info("naukri_pagination_complete", pages=page_num - 1, total=len(all_jobs))
+        logger.info("jobs_found", source="naukri", total=len(all_jobs))
         return all_jobs
 
-    # ── Login ──────────────────────────────────────────────────────────────────
-
-    async def _login(self, page: Page) -> None:
-        logger.info("naukri_login_started", email=self._email)
-
-        await page.goto(_NAUKRI_LOGIN_URL, wait_until="domcontentloaded", timeout=30_000)
-        await _delay(page, 1_000, 1_500)
-
-        # Fill email
-        if not await self._fill(page, _Sel.LOGIN_EMAIL, self._email):
-            await self._screenshot(page, "naukri_login_email_missing")
-            logger.error("naukri_login_failed", reason="email field not found")
-            raise RuntimeError("Naukri login: email input field not found")
-        await _delay(page, 300, 600)
-
-        # Fill password
-        if not await self._fill(page, _Sel.LOGIN_PASSWORD, self._password):
-            await self._screenshot(page, "naukri_login_password_missing")
-            logger.error("naukri_login_failed", reason="password field not found")
-            raise RuntimeError("Naukri login: password input field not found")
-        await _delay(page, 300, 600)
-
-        # Submit
-        await self._submit_login(page)
-
-        # Wait for post-login navigation
-        try:
-            await page.wait_for_load_state("networkidle", timeout=20_000)
-        except Exception:
-            try:
-                await page.wait_for_load_state("domcontentloaded", timeout=10_000)
-            except Exception:
-                pass
-        await _delay(page, 1_500, 2_500)
-
-        current_url = page.url
-        # Employer login success lands on /employer/... or /ms/employer or the main site.
-        # Still-on-login-page paths indicate failure.
-        _FAILURE_PATHS = ("/employer-login", "/nlogin/", "/challenge")
-        if any(p in current_url for p in _FAILURE_PATHS):
-            error_text = ""
-            for sel in _Sel.LOGIN_ERROR:
-                try:
-                    el = await page.query_selector(sel)
-                    if el:
-                        error_text = (await el.inner_text()).strip()
-                        break
-                except Exception:
-                    continue
-            await self._screenshot(page, "naukri_login_failed")
-            logger.error(
-                "naukri_login_failed",
-                url    = current_url,
-                reason = error_text or "redirected to gated page after submit",
-            )
-            raise RuntimeError(
-                f"Naukri login failed — landed on {current_url}. "
-                f"Reason: {error_text or 'unknown'}"
-            )
-
-        logger.info("naukri_login_success", url=current_url)
-
-    async def _submit_login(self, page: Page) -> None:
-        for sel in _Sel.LOGIN_SUBMIT:
-            try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=2_000):
-                    await btn.click()
-                    logger.debug("naukri_login_submit_clicked", selector=sel)
-                    return
-            except Exception:
-                continue
-        await page.keyboard.press("Enter")
-        logger.debug("naukri_login_submit_via_enter")
 
     # ── Overlay dismissal ──────────────────────────────────────────────────────
 
@@ -809,27 +751,6 @@ class NaukriAgent:
             params["pageNo"] = str(page_no)
 
         return f"{_NAUKRI_SEARCH_URL}?{urlencode(params)}"
-
-    # ── Form fill helper ───────────────────────────────────────────────────────
-
-    async def _fill(self, page: Page, selectors: list[str], value: str) -> bool:
-        for sel in selectors:
-            try:
-                loc = page.locator(sel).first
-                if not await loc.is_visible(timeout=3_000):
-                    continue
-                await loc.click()
-                await _delay(page, 150, 300)
-                await loc.press("Control+a")
-                await _delay(page, 80, 150)
-                await loc.fill("")
-                await _delay(page, 100, 200)
-                await loc.type(value, delay=random.randint(50, 100))
-                await _delay(page, 200, 400)
-                return True
-            except Exception:
-                continue
-        return False
 
     # ── Block detection ────────────────────────────────────────────────────────
 

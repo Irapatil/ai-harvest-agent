@@ -132,6 +132,8 @@ def _save_source_results(
     path = out_dir / filename
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     logger.info("source_results_saved", source=source, path=str(path), count=len(jobs))
+    if source.lower() == "linkedin":
+        logger.info("linkedin_json_saved", path=str(path), count=len(jobs))
     return str(path.resolve())
 
 
@@ -154,6 +156,18 @@ async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -
     run_id  = _make_run_id()
     now_iso = datetime.now(timezone.utc).isoformat()
 
+    logger.info(
+        "config_loaded",
+        keyword              = config.filters.keyword,
+        location             = config.filters.location,
+        job_type             = config.filters.job_type,
+        work_mode            = config.filters.work_mode,
+        search_window_hours  = config.filters.search_window_hours,
+        max_jobs             = config.filters.max_jobs,
+        domain               = config.filters.domain,
+        hiring_entity        = config.filters.hiring_entity,
+    )
+
     enabled = [
         src for src in ["naukri", "linkedin", "dice"]
         if getattr(config.sources, src, False)
@@ -171,6 +185,14 @@ async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -
         keyword   = config.filters.keyword,
     )
     log.info("harvest_agent_start")
+    log.info(
+        "search_started",
+        run_id   = run_id,
+        sources  = enabled,
+        keyword  = config.filters.keyword,
+        location = config.filters.location,
+        job_type = config.filters.job_type,
+    )
 
     # ── Run orchestrator ──────────────────────────────────────────────────────
     orch = OrchestratorAgent(config)
@@ -227,7 +249,8 @@ async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -
         log.warning("history_save_failed", error=str(exc))
 
     log.info(
-        "harvest_agent_done",
+        "harvest_completed",
+        run_id         = run_id,
         total          = result.total_jobs,
         verified       = result.verified_jobs,
         direct_clients = result.direct_clients,
@@ -235,6 +258,7 @@ async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -
         staffing_firms = result.staffing_firms,
         ambiguous      = result.ambiguous,
         sources        = result.sources_executed,
+        combined_path  = result.combined_path,
     )
 
     source_counts = {
@@ -254,6 +278,7 @@ async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -
         "staffing_firms":   result.staffing_firms,
         "ambiguous":        result.ambiguous,
         "verified_jobs":    result.verified_jobs,
+        "combined_path":    result.combined_path,
         "saved_to":         "data/results",
         "filters_applied":  filters_snap,
     }

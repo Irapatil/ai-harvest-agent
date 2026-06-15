@@ -105,8 +105,9 @@ class ScheduleConfig(BaseModel):
 
 class BrowserConfig(BaseModel):
     """Playwright launch settings."""
-    headless:   bool = False
-    slow_mo_ms: int  = Field(0, ge=0, le=3000)
+    headless:       bool = False
+    slow_mo_ms:     int  = Field(0, ge=0, le=3000)
+    chrome_profile: str  = "data/chrome_profile"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

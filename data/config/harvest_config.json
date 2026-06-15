@@ -8,7 +8,7 @@
     "keyword": "AI Engineer",
     "location": "India",
     "job_type": "Any",
-    "work_mode": "Remote",
+    "work_mode": "Any",
     "search_window_hours": 24,
     "max_jobs": 50,
     "domain": "Any",
@@ -33,6 +33,7 @@
   },
   "browser": {
     "headless": false,
-    "slow_mo_ms": 0
+    "slow_mo_ms": 0,
+    "chrome_profile": "data/chrome_profile"
   }
 }

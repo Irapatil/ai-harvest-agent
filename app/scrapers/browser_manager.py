@@ -151,3 +151,108 @@ class BrowserManager:
         if not self._context:
             raise RuntimeError("BrowserManager must be used as an async context manager")
         return await self._context.new_page()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PersistentBrowserManager
+# ══════════════════════════════════════════════════════════════════════════════
+
+class PersistentBrowserManager:
+    """
+    Playwright persistent browser context using launch_persistent_context().
+
+    Stores cookies and session data in a dedicated Chrome profile directory so
+    users only need to log in once manually.  The profile is created on first
+    use; subsequent runs reuse the saved session automatically.
+
+    Usage::
+
+        async with PersistentBrowserManager(profile_dir="data/chrome_profile") as pbm:
+            page = await pbm.new_page()
+            await page.goto("https://www.linkedin.com/jobs")
+
+    NOTE: The profile directory must not be open in another Chrome instance
+    at the same time.  Use a dedicated profile for the harvest agent, not
+    your default Chrome profile.
+    """
+
+    def __init__(
+        self,
+        profile_dir: "str | Path",
+        headless:    bool = False,
+        slow_mo:     int  = 0,
+        channel:     str  = "chrome",
+    ) -> None:
+        from pathlib import Path as _Path
+        self._profile_dir: "Path"            = _Path(profile_dir)
+        self._headless:    bool              = headless
+        self._slow_mo:     int               = slow_mo
+        self._channel:     str               = channel
+        self._pw:          Playwright | None = None
+        self._context:     BrowserContext | None = None
+
+    async def __aenter__(self) -> "PersistentBrowserManager":
+        from pathlib import Path as _Path
+        self._profile_dir.mkdir(parents=True, exist_ok=True)
+        self._pw = await async_playwright().start()
+
+        self._context = await self._pw.chromium.launch_persistent_context(
+            user_data_dir       = str(self._profile_dir),
+            channel             = self._channel,
+            headless            = self._headless,
+            slow_mo             = self._slow_mo,
+            args                = [
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-infobars",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+            ],
+            ignore_https_errors = True,
+            viewport            = {"width": 1366, "height": 900},
+            user_agent          = _USER_AGENT,
+            locale              = "en-US",
+            timezone_id         = "Europe/London",
+            color_scheme        = "light",
+            java_script_enabled = True,
+        )
+
+        for script in _STEALTH_SCRIPTS:
+            await self._context.add_init_script(script)
+
+        logger.info(
+            "persistent_browser_started",
+            profile_dir = str(self._profile_dir),
+            headless    = self._headless,
+            channel     = self._channel,
+        )
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        if self._context:
+            try:
+                await self._context.close()
+            except Exception:
+                pass
+        if self._pw:
+            try:
+                await self._pw.stop()
+            except Exception:
+                pass
+        logger.info("persistent_browser_stopped")
+
+    async def new_page(self) -> Page:
+        """Open and return a fresh browser tab."""
+        if not self._context:
+            raise RuntimeError("PersistentBrowserManager must be used as an async context manager")
+        return await self._context.new_page()
+
+    @property
+    def context(self) -> BrowserContext:
+        if not self._context:
+            raise RuntimeError("PersistentBrowserManager must be used as an async context manager")
+        return self._context

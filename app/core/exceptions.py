@@ -1,8 +1,6 @@
 """Custom exceptions and FastAPI exception handlers."""
 from __future__ import annotations
-
 from typing import Any
-
 from fastapi import Request, status
 from fastapi.responses import JSONResponse
 

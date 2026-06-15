@@ -34,16 +34,14 @@ from urllib.parse import quote_plus
 import structlog
 from playwright.async_api import ElementHandle, Page
 
-from app.config import get_settings
 from app.models.harvest_models import FiltersConfig
-from app.scrapers.browser_manager import BrowserManager
+from app.scrapers.browser_manager import PersistentBrowserManager
 
 logger = structlog.get_logger(__name__)
 
-LINKEDIN_SESSION_FILE = Path("data/config/linkedin_session.json")
+LINKEDIN_SESSION_FILE = Path("data/sessions/linkedin_session.json")
 _DEBUG_DIR            = Path("debug")
 
-_LINKEDIN_LOGIN_URL  = "https://www.linkedin.com/login"
 _LINKEDIN_SEARCH_URL = "https://www.linkedin.com/jobs/search/?"
 
 # URLs that indicate we are NOT logged in
@@ -297,19 +295,17 @@ async def _retry(coro_fn, retries: int = 3, delay_s: float = 2.0):
 
 class LinkedInAgent:
     """
-    Autonomous LinkedIn job harvester requiring employer authentication.
+    LinkedIn job harvester using a persistent Chrome profile session.
 
-    Instantiate fresh for each run. BrowserManager is created and destroyed
-    inside `harvest()`. Credentials are loaded from .env via Settings — never
-    hardcoded.
+    No login automation — the user logs in once via POST /linkedin-setup-session
+    and the Chrome profile directory persists the session for all future runs.
 
-    Raises LinkedInLoginError if authentication cannot be established.
+    Instantiate fresh for each run.  PersistentBrowserManager is created and
+    destroyed inside harvest().
     """
 
     def __init__(self) -> None:
-        cfg             = get_settings()
-        self._email:    str = cfg.linkedin_email
-        self._password: str = cfg.linkedin_password
+        pass
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -320,36 +316,66 @@ class LinkedInAgent:
         slow_mo:  int  = 0,
     ) -> list[LinkedInScrapedJob]:
         """
-        Authenticate to LinkedIn and harvest jobs matching `filters`.
-
-        Raises LinkedInLoginError if authentication fails — never falls back
-        to guest mode.
+        Open LinkedIn Jobs with the persistent Chrome profile and harvest
+        jobs matching filters.  Returns [] if the profile is not authenticated
+        (user must call POST /linkedin-setup-session first).
         """
+        from app.services.config_service import ConfigService
+        chrome_profile = ConfigService().load().browser.chrome_profile
+
         logger.info(
             "linkedin_agent_started",
-            keyword   = filters.keyword,
-            location  = filters.location,
-            job_type  = filters.job_type,
-            work_mode = filters.work_mode,
-            max_jobs  = filters.max_jobs,
+            keyword        = filters.keyword,
+            location       = filters.location,
+            job_type       = filters.job_type,
+            work_mode      = filters.work_mode,
+            max_jobs       = filters.max_jobs,
+            chrome_profile = chrome_profile,
         )
-        session_path = str(LINKEDIN_SESSION_FILE) if LINKEDIN_SESSION_FILE.exists() else None
-        async with BrowserManager(
-            headless      = headless,
-            slow_mo       = slow_mo,
-            storage_state = session_path,
-        ) as bm:
-            page = await bm.new_page()
+        async with PersistentBrowserManager(
+            profile_dir = chrome_profile,
+            headless    = headless,
+            slow_mo     = slow_mo,
+        ) as pbm:
+            page = await pbm.new_page()
             jobs = await self._run(page, filters)
 
-        logger.info("linkedin_harvest_done", total=len(jobs))
+        logger.info(
+            "linkedin_harvest_completed",
+            total    = len(jobs),
+            keyword  = filters.keyword,
+            location = filters.location,
+        )
         return jobs
 
     # ── Internal flow ──────────────────────────────────────────────────────────
 
     async def _run(self, page: Page, f: FiltersConfig) -> list[LinkedInScrapedJob]:
-        await self._ensure_authenticated(page)
-        await _screenshot(page, "linkedin_login")
+        """Navigate directly to LinkedIn Jobs search — no login step."""
+        search_url = self._build_search_url(f, start=0)
+        logger.info("linkedin_navigating_to_jobs", url=search_url)
+
+        try:
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
+        except Exception as exc:
+            logger.error("linkedin_navigation_failed", error=str(exc))
+            return []
+
+        await page.wait_for_timeout(3_000)
+
+        # Check for redirect to login — profile session missing or expired
+        current_url = page.url
+        if any(p in current_url for p in _GATED_PATHS):
+            logger.error(
+                "linkedin_not_authenticated",
+                url  = current_url,
+                hint = "Chrome profile has no LinkedIn session. "
+                       "Call POST /linkedin-setup-session to log in.",
+            )
+            return []
+
+        logger.info("linkedin_session_active", url=current_url)
+        await _screenshot(page, "linkedin_jobs_page")
         return await self._paginate_and_collect(page, f)
 
     async def _paginate_and_collect(
@@ -369,6 +395,16 @@ class LinkedInAgent:
         batch_size:  int                      = 25
         safety_cap:  int                      = f.max_jobs if f.max_jobs > 0 else 5_000
         empty_pages: int                      = 0
+
+        logger.info(
+            "linkedin_search_started",
+            keyword   = f.keyword,
+            location  = f.location,
+            job_type  = f.job_type,
+            work_mode = f.work_mode,
+            max_jobs  = f.max_jobs,
+        )
+        logger.info("linkedin_pagination_started", safety_cap=safety_cap)
 
         while len(all_jobs) < safety_cap:
             start      = page_num * batch_size
@@ -430,251 +466,14 @@ class LinkedInAgent:
                         all_jobs.append(j)
 
             logger.info("linkedin_page_done", page=page_num + 1, page_new=len(page_jobs), total=len(all_jobs))
+            logger.info("linkedin_page_processed", page=page_num + 1, jobs_this_page=len(page_jobs), total_collected=len(all_jobs))
             page_num += 1
             await _delay(page, 1_500, 2_500)   # polite inter-page delay
 
         logger.info("linkedin_pagination_complete", pages=page_num, total=len(all_jobs))
         return all_jobs
 
-    # ── Authentication ─────────────────────────────────────────────────────────
 
-    async def _ensure_authenticated(self, page: Page) -> None:
-        """
-        Guarantee the browser is logged in.
-
-        1. If a session file exists → go to feed, validate auth indicators.
-           - If still valid → done.
-           - If expired     → attempt credential login.
-        2. If no session file → attempt credential login directly.
-        3. If login fails → raise LinkedInLoginError (hard stop).
-        """
-        if LINKEDIN_SESSION_FILE.exists():
-            logger.info("linkedin_session_exists_validating")
-            try:
-                await page.goto(
-                    "https://www.linkedin.com/feed/",
-                    wait_until="domcontentloaded",
-                    timeout=25_000,
-                )
-                await _delay(page, 1_500, 2_500)
-
-                if await self._is_authenticated(page):
-                    logger.info("linkedin_session_valid", url=page.url)
-                    return  # ← already authenticated
-
-                logger.info("linkedin_session_expired_attempting_credential_login", url=page.url)
-            except Exception as exc:
-                logger.warning("linkedin_session_check_failed", error=str(exc))
-
-            # Session expired — fall through to credential login
-            await self._login(page)
-
-        else:
-            logger.info("linkedin_no_session_file_attempting_credential_login")
-            await self._login(page)
-
-    async def _is_authenticated(self, page: Page) -> bool:
-        """Return True if the page shows authenticated LinkedIn nav/avatar."""
-        url = page.url
-        if any(p in url for p in _GATED_PATHS):
-            return False
-
-        # Check for primary nav (most reliable indicator)
-        for sel in _Sel.AUTH_NAV:
-            try:
-                el = await page.query_selector(sel)
-                if el and await el.is_visible():
-                    logger.debug("linkedin_auth_indicator_found", selector=sel)
-                    return True
-            except Exception:
-                continue
-
-        # Check for avatar
-        for sel in _Sel.AUTH_AVATAR:
-            try:
-                el = await page.query_selector(sel)
-                if el and await el.is_visible():
-                    logger.debug("linkedin_auth_avatar_found", selector=sel)
-                    return True
-            except Exception:
-                continue
-
-        return False
-
-    async def _login(self, page: Page) -> None:
-        """
-        Perform credential-based LinkedIn login.
-        Raises LinkedInLoginError on any failure (no silent fallback).
-        """
-        if not self._email or not self._password:
-            await _screenshot(page, "linkedin_error")
-            raise LinkedInLoginError(
-                "LinkedIn credentials missing — set LINKEDIN_EMAIL and LINKEDIN_PASSWORD in .env"
-            )
-
-        logger.info("linkedin_credential_login_start", email=self._email)
-
-        try:
-            await page.goto(_LINKEDIN_LOGIN_URL, wait_until="domcontentloaded", timeout=30_000)
-        except Exception as exc:
-            await _screenshot(page, "linkedin_error")
-            await _save_html(page, "linkedin_error")
-            raise LinkedInLoginError(f"Could not reach LinkedIn login page: {exc}") from exc
-
-        await _delay(page, 1_500, 2_500)
-        await _screenshot(page, "linkedin_login_page")
-
-        # Detect SSO redirect before attempting form fill
-        if any(p in page.url for p in ("login.live.com", "login.microsoftonline.com", "accounts.google.com")):
-            await _screenshot(page, "linkedin_sso_redirect")
-            await _save_html(page, "linkedin_sso_redirect")
-            raise LinkedInLoginError(
-                f"LinkedIn account uses SSO ({page.url}) — "
-                "use POST /linkedin-save-session for manual browser login first"
-            )
-
-        # Fill email
-        if not await self._fill_field(page, _Sel.LOGIN_EMAIL, self._email):
-            await _screenshot(page, "linkedin_error")
-            await _save_html(page, "linkedin_error_email")
-            raise LinkedInLoginError("LinkedIn login: email input field not found or not fillable")
-
-        await _delay(page, 400, 800)
-
-        # Fill password
-        if not await self._fill_field(page, _Sel.LOGIN_PASSWORD, self._password):
-            await _screenshot(page, "linkedin_error")
-            await _save_html(page, "linkedin_error_password")
-            raise LinkedInLoginError("LinkedIn login: password input field not found or not fillable")
-
-        await _delay(page, 400, 800)
-
-        # Click Sign In
-        await self._submit_login(page)
-        await _delay(page, 3_000, 4_000)
-
-        # Wait until we leave the login page
-        try:
-            await page.wait_for_url(
-                lambda url: not any(p in url for p in ("/login", "/uas/")),
-                timeout=20_000,
-            )
-        except Exception:
-            pass
-
-        await _delay(page, 1_500, 2_500)
-        current_url = page.url
-
-        # Check for SSO redirect after submit (deferred OAuth)
-        if any(p in current_url for p in ("login.live.com", "login.microsoftonline.com", "accounts.google.com")):
-            await _screenshot(page, "linkedin_sso_redirect_post_submit")
-            await _save_html(page, "linkedin_sso_redirect_post_submit")
-            raise LinkedInLoginError(
-                f"LinkedIn redirected to SSO after submit ({current_url}) — "
-                "this account requires manual session capture via POST /linkedin-save-session"
-            )
-
-        if any(p in current_url for p in _GATED_PATHS):
-            await _screenshot(page, "linkedin_login_failed")
-            await _save_html(page, "linkedin_login_failed")
-            raise LinkedInLoginError(
-                f"LinkedIn login failed — still on gated page after submit: {current_url}"
-            )
-
-        # Validate we're really in
-        if not await self._is_authenticated(page):
-            await _screenshot(page, "linkedin_login_not_authenticated")
-            await _save_html(page, "linkedin_login_not_authenticated")
-            raise LinkedInLoginError(
-                f"LinkedIn login: no authenticated nav/avatar found after redirect to {current_url}"
-            )
-
-        # Save session so next run can skip login
-        try:
-            LINKEDIN_SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-            await page.context.storage_state(path=str(LINKEDIN_SESSION_FILE))
-            logger.info("linkedin_session_saved", path=str(LINKEDIN_SESSION_FILE))
-        except Exception as exc:
-            logger.warning("linkedin_session_save_failed", error=str(exc))
-
-        logger.info("linkedin_login_success", url=current_url)
-
-    async def _fill_field(self, page: Page, selectors: list[str], value: str) -> bool:
-        """Fill a login field using three strategies: Playwright fill, React JS setter, keyboard type."""
-        _react_fill = """
-            ([sel, val]) => {
-                const el = document.querySelector(sel);
-                if (!el) return false;
-                const setter = Object.getOwnPropertyDescriptor(
-                    window.HTMLInputElement.prototype, 'value'
-                ).set;
-                el.focus(); el.click();
-                setter.call(el, val);
-                ['input', 'change'].forEach(e =>
-                    el.dispatchEvent(new Event(e, { bubbles: true, cancelable: true }))
-                );
-                return el.value === val;
-            }
-        """
-        for sel in selectors:
-            # Strategy 1: Playwright force fill
-            try:
-                loc = page.locator(sel).first
-                await loc.wait_for(state="visible", timeout=3_000)
-                await loc.click(force=True)
-                await _delay(page, 100, 200)
-                await loc.fill(value, force=True)
-                await _delay(page, 100, 200)
-                if await loc.input_value() == value:
-                    return True
-            except Exception:
-                pass
-
-            # Strategy 2: React-native JS setter
-            try:
-                ok = await page.evaluate(_react_fill, [sel, value])
-                if ok:
-                    return True
-            except Exception:
-                pass
-
-            # Strategy 3: focus + keyboard type
-            try:
-                await page.evaluate(f"document.querySelector('{sel}')?.focus()")
-                await page.keyboard.press("Control+a")
-                await page.keyboard.type(value, delay=random.randint(40, 80))
-                actual = await page.locator(sel).first.input_value()
-                if actual and (value in actual or actual == value):
-                    return True
-            except Exception:
-                continue
-
-        return False
-
-    async def _submit_login(self, page: Page) -> None:
-        for sel in _Sel.LOGIN_SUBMIT:
-            try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=2_000):
-                    await btn.click(force=True)
-                    logger.debug("linkedin_submit_clicked", selector=sel)
-                    return
-            except Exception:
-                continue
-        try:
-            await page.evaluate("""
-                () => {
-                    const btn = document.querySelector('button[type="submit"]')
-                        || document.querySelector('button.btn__primary--large')
-                        || Array.from(document.querySelectorAll('button'))
-                               .find(b => /sign.?in/i.test(b.textContent));
-                    if (btn) btn.click();
-                }
-            """)
-            logger.debug("linkedin_submit_via_js")
-        except Exception:
-            await page.keyboard.press("Enter")
-            logger.debug("linkedin_submit_via_enter")
 
     # ── Search URL builder ─────────────────────────────────────────────────────
 
@@ -790,6 +589,7 @@ class LinkedInAgent:
             raw = await page.query_selector_all(sel)
             if raw:
                 logger.info("linkedin_cards_found", selector=sel, count=len(raw))
+                logger.info("linkedin_jobs_found", count=len(raw))
                 break
 
         if not raw:

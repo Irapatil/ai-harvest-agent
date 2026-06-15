@@ -4,6 +4,7 @@ Naukri Harvest Agent API routes.
 Visible endpoints (Swagger)
 ───────────────────────────
   POST   /run-naukri-agent          trigger a Naukri harvest run now
+  POST   /naukri-setup-session      open Chrome profile for one-time manual login
   GET    /naukri-results            list all saved Naukri result files
   GET    /naukri-results/{run_id}   retrieve one saved result
 """
@@ -182,6 +183,70 @@ async def run_naukri_agent() -> Any:
         log.warning("naukri_save_failed", error=str(exc))
 
     return response.model_dump()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POST /naukri-setup-session
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/naukri-setup-session", status_code=status.HTTP_200_OK)
+async def setup_naukri_session() -> Any:
+    """
+    Opens Chrome with the dedicated harvest agent profile directory.
+    Log in to Naukri / recruit.naukri.com manually in the browser window that appears.
+    Close the browser when done — the session is persisted in the profile
+    directory and all future /run-naukri-agent calls will reuse it.
+
+    Profile directory: data/chrome_profile (configurable in harvest_config.json)
+    Times out after 10 minutes.
+    """
+    from app.scrapers.browser_manager import PersistentBrowserManager
+
+    config         = _config_svc.load()
+    chrome_profile = config.browser.chrome_profile
+
+    async def _open_for_login() -> str:
+        async with PersistentBrowserManager(
+            profile_dir = chrome_profile,
+            headless    = False,
+        ) as pbm:
+            page = await pbm.new_page()
+            await page.goto(
+                "https://recruit.naukri.com/",
+                wait_until = "domcontentloaded",
+                timeout    = 30_000,
+            )
+            logger.info(
+                "naukri_setup_browser_opened",
+                msg     = "Naukri login page opened. Please log in manually.",
+                profile = chrome_profile,
+            )
+
+            _LOGIN_PATHS = ("/recruit/login", "/nlogin/login", "/nlogin/")
+            for _ in range(300):   # 300 × 2 s = 10 min
+                await page.wait_for_timeout(2_000)
+                url = page.url
+                if not any(p in url for p in _LOGIN_PATHS):
+                    logger.info("naukri_setup_login_detected", url=url)
+                    break
+            else:
+                raise RuntimeError("Setup timed out — login not completed within 10 minutes")
+
+        return chrome_profile
+
+    try:
+        if needs_proactor():
+            profile: str = await run_in_proactor(_open_for_login)
+        else:
+            profile = await _open_for_login()
+        return {
+            "status":   "ready",
+            "message":  "Naukri session saved in Chrome profile. Future /run-naukri-agent calls will reuse it.",
+            "profile":  profile,
+        }
+    except Exception as exc:
+        logger.error("naukri_setup_session_failed", error=str(exc))
+        return _err("Failed to set up Naukri session", str(exc))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

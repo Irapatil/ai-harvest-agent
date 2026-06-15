@@ -4,7 +4,7 @@ LinkedIn Harvest Agent API routes.
 Visible endpoints (Swagger)
 ───────────────────────────
   POST   /run-linkedin-agent             trigger a LinkedIn harvest run now
-  POST   /linkedin-save-session          open browser for manual login + save session
+  POST   /linkedin-setup-session         open Chrome profile for one-time manual login
   GET    /linkedin-results               list all saved LinkedIn result files
   GET    /linkedin-results/{run_id}      retrieve one saved result
 """
@@ -20,7 +20,6 @@ from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import JSONResponse
 
 from app.agents.linkedin_agent import (
-    LINKEDIN_SESSION_FILE,
     LinkedInAgent,
     LinkedInLoginError,
     LinkedInScrapedJob,
@@ -191,139 +190,67 @@ async def run_linkedin_agent() -> Any:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# POST /linkedin-save-session
+# POST /linkedin-setup-session
 # ══════════════════════════════════════════════════════════════════════════════
 
-@router.post("/linkedin-save-session", status_code=status.HTTP_200_OK)
-async def save_linkedin_session() -> Any:
+@router.post("/linkedin-setup-session", status_code=status.HTTP_200_OK)
+async def setup_linkedin_session() -> Any:
     """
-    Opens a visible Chromium browser window on your desktop.
-    Credentials from .env are auto-filled; complete any OTP/2FA manually.
-    The session is saved to data/config/linkedin_session.json and reused
-    by all future /run-linkedin-agent calls — no re-login needed.
+    Opens Chrome with the dedicated harvest agent profile directory.
+    Log in to LinkedIn manually in the browser window that appears.
+    Close the browser when done — the session is persisted in the profile
+    directory and all future /run-linkedin-agent calls will reuse it.
 
-    Times out after 5 minutes if login is not completed.
+    Profile directory: data/chrome_profile (configurable in harvest_config.json)
+    Times out after 10 minutes.
     """
-    from playwright.async_api import async_playwright
+    from app.scrapers.browser_manager import PersistentBrowserManager
 
-    from app.config import get_settings
-    from app.scrapers.browser_manager import (
-        _LAUNCH_ARGS,
-        _STEALTH_SCRIPTS,
-        _USER_AGENT,
-    )
+    config         = ConfigService().load()
+    chrome_profile = config.browser.chrome_profile
 
-    cfg = get_settings()
+    async def _open_for_login() -> str:
+        async with PersistentBrowserManager(
+            profile_dir = chrome_profile,
+            headless    = False,
+        ) as pbm:
+            page = await pbm.new_page()
+            await page.goto(
+                "https://www.linkedin.com/login",
+                wait_until = "domcontentloaded",
+                timeout    = 30_000,
+            )
+            logger.info(
+                "linkedin_setup_browser_opened",
+                msg     = "LinkedIn login page opened. Please log in manually.",
+                profile = chrome_profile,
+            )
 
-    async def _do_manual_login() -> str:
-        pw      = await async_playwright().start()
-        browser = await pw.chromium.launch(headless=False, args=_LAUNCH_ARGS)
-        context = await browser.new_context(
-            viewport            = {"width": 1366, "height": 900},
-            user_agent          = _USER_AGENT,
-            locale              = "en-US",
-            timezone_id         = "Europe/London",
-            color_scheme        = "light",
-            java_script_enabled = True,
-        )
-        for script in _STEALTH_SCRIPTS:
-            await context.add_init_script(script)
-
-        page = await context.new_page()
-        await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=30_000)
-        await page.wait_for_timeout(2_500)
-
-        _react_fill = """
-            ([sel, val]) => {
-                const el = document.querySelector(sel);
-                if (!el) return false;
-                const setter = Object.getOwnPropertyDescriptor(
-                    window.HTMLInputElement.prototype, 'value'
-                ).set;
-                el.focus(); el.click();
-                setter.call(el, val);
-                ['input', 'change'].forEach(e =>
-                    el.dispatchEvent(new Event(e, { bubbles: true, cancelable: true }))
-                );
-                return el.value === val;
-            }
-        """
-        for sel in ["#username", "input[name='session_key']", "input[type='text']"]:
-            try:
-                ok = await page.evaluate(_react_fill, [sel, cfg.linkedin_email])
-                if ok:
+            _GATED = ("/login", "/checkpoint", "/challenge", "/authwall", "/uas/")
+            for _ in range(300):   # 300 × 2 s = 10 min
+                await page.wait_for_timeout(2_000)
+                url = page.url
+                if "linkedin.com" in url and not any(p in url for p in _GATED):
+                    logger.info("linkedin_setup_login_detected", url=url)
                     break
-            except Exception:
-                continue
+            else:
+                raise RuntimeError("Setup timed out — login not completed within 10 minutes")
 
-        await page.wait_for_timeout(600)
-
-        for sel in ["#password", "input[name='session_password']", "input[type='password']"]:
-            try:
-                ok = await page.evaluate(_react_fill, [sel, cfg.linkedin_password])
-                if ok:
-                    break
-            except Exception:
-                continue
-
-        await page.wait_for_timeout(600)
-
-        try:
-            await page.evaluate("""
-                () => {
-                    const btn = document.querySelector('button[type="submit"]')
-                               || document.querySelector('button.btn__primary--large')
-                               || Array.from(document.querySelectorAll('button'))
-                                        .find(b => /sign.?in/i.test(b.textContent));
-                    if (btn) btn.click();
-                }
-            """)
-        except Exception:
-            await page.keyboard.press("Enter")
-
-        logger.info(
-            "linkedin_credentials_submitted",
-            msg="Credentials auto-filled. If a Microsoft/Google SSO window opened, complete the login there.",
-        )
-
-        _GATED      = ("/login", "/checkpoint", "/challenge", "/authwall", "/uas/")
-        _SSO_HOSTS  = ("microsoftonline.com", "login.live.com", "accounts.google.com", "appleid.apple.com")
-        for _ in range(150):
-            await page.wait_for_timeout(2_000)
-            url = page.url
-            on_linkedin = "linkedin.com" in url
-            on_sso      = any(h in url for h in _SSO_HOSTS)
-            # Stay in loop while on SSO provider OR on a LinkedIn gated path
-            if on_sso:
-                continue
-            if on_linkedin and not any(p in url for p in _GATED):
-                break
-        else:
-            await browser.close()
-            await pw.stop()
-            raise RuntimeError("Login timed out after 5 minutes — please try again")
-
-        LINKEDIN_SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-        await context.storage_state(path=str(LINKEDIN_SESSION_FILE))
-        logger.info("linkedin_session_saved", path=str(LINKEDIN_SESSION_FILE))
-
-        await browser.close()
-        await pw.stop()
-        return str(LINKEDIN_SESSION_FILE.resolve())
+        return chrome_profile
 
     try:
         if needs_proactor():
-            saved_to: str = await run_in_proactor(_do_manual_login)
+            profile: str = await run_in_proactor(_open_for_login)
         else:
-            saved_to = await _do_manual_login()
+            profile = await _open_for_login()
         return {
-            "status":   "saved",
-            "message":  "LinkedIn session saved — future /run-linkedin-agent calls will skip login",
-            "saved_to": saved_to,
+            "status":   "ready",
+            "message":  "LinkedIn session saved in Chrome profile. Future /run-linkedin-agent calls will reuse it.",
+            "profile":  profile,
         }
     except Exception as exc:
-        logger.error("linkedin_save_session_failed", error=str(exc))
-        return _err("Failed to save LinkedIn session", str(exc))
+        logger.error("linkedin_setup_session_failed", error=str(exc))
+        return _err("Failed to set up LinkedIn session", str(exc))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
