@@ -146,16 +146,16 @@ class _Sel:
     ]
     # Naukri 2024-2026 uses article[data-job-id]; old site used .jobTuple
     CARD: list[str] = [
-        "article[data-job-id]",
+        "div[data-job-id]",          # current Naukri 2025 DOM
+        "article[data-job-id]",      # legacy
+        "li[data-job-id]",
         "article.jobTuple",
         "article[class*='tuple']",
         "article[class*='job']",
         ".srp-jobtuple-wrapper article",
         ".jobTuple",
-        "div[data-job-id]",
         "div[class*='jobTuple']",
         "div[class*='job-card']",
-        "li[data-job-id]",
         "li[class*='jobTuple']",
     ]
 

@@ -181,7 +181,7 @@ class PersistentBrowserManager:
         profile_dir: "str | Path",
         headless:    bool = False,
         slow_mo:     int  = 0,
-        channel:     str  = "chrome",
+        channel:     str  = "chromium",
     ) -> None:
         from pathlib import Path as _Path
         self._profile_dir: "Path"            = _Path(profile_dir)
@@ -196,9 +196,11 @@ class PersistentBrowserManager:
         self._profile_dir.mkdir(parents=True, exist_ok=True)
         self._pw = await async_playwright().start()
 
+        # channel="chromium" → use Playwright's bundled Chromium (not system Chrome).
+        # System Chrome (channel="chrome") exits immediately via --remote-debugging-pipe
+        # on Windows when the profile directory is new — confirmed by runtime test.
         self._context = await self._pw.chromium.launch_persistent_context(
             user_data_dir       = str(self._profile_dir),
-            channel             = self._channel,
             headless            = self._headless,
             slow_mo             = self._slow_mo,
             args                = [
@@ -228,7 +230,7 @@ class PersistentBrowserManager:
             "persistent_browser_started",
             profile_dir = str(self._profile_dir),
             headless    = self._headless,
-            channel     = self._channel,
+            channel     = "chromium",
         )
         return self
 
