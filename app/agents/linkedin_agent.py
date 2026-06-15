@@ -40,7 +40,7 @@ from app.scrapers.browser_manager import PersistentBrowserManager
 logger = structlog.get_logger(__name__)
 
 LINKEDIN_SESSION_FILE = Path("data/sessions/linkedin_session.json")
-_DEBUG_DIR            = Path("debug")
+_DEBUG_DIR            = Path("data/debug/linkedin")
 
 _LINKEDIN_SEARCH_URL = "https://www.linkedin.com/jobs/search/?"
 
@@ -324,6 +324,18 @@ class LinkedInAgent:
         chrome_profile = ConfigService().load().browser.chrome_profile
 
         logger.info(
+            "config_loaded",
+            source              = "linkedin",
+            keyword             = filters.keyword,
+            location            = filters.location,
+            job_type            = filters.job_type,
+            work_mode           = filters.work_mode,
+            domain              = getattr(filters, "domain", "Any"),
+            search_window_hours = filters.search_window_hours,
+            max_jobs            = filters.max_jobs,
+            chrome_profile      = chrome_profile,
+        )
+        logger.info(
             "linkedin_agent_started",
             keyword        = filters.keyword,
             location       = filters.location,
@@ -332,14 +344,25 @@ class LinkedInAgent:
             max_jobs       = filters.max_jobs,
             chrome_profile = chrome_profile,
         )
-        async with PersistentBrowserManager(
-            profile_dir = chrome_profile,
-            headless    = headless,
-            slow_mo     = slow_mo,
-        ) as pbm:
-            page = await pbm.new_page()
-            jobs = await self._run(page, filters)
+        try:
+            async with PersistentBrowserManager(
+                profile_dir = chrome_profile,
+                headless    = headless,
+                slow_mo     = slow_mo,
+            ) as pbm:
+                page = await pbm.new_page()
+                jobs = await self._run(page, filters)
+        except Exception as exc:
+            logger.exception("agent_failed", source="linkedin", error=str(exc))
+            return []
 
+        logger.info(
+            "agent_completed",
+            source   = "linkedin",
+            total    = len(jobs),
+            keyword  = filters.keyword,
+            location = filters.location,
+        )
         logger.info(
             "linkedin_harvest_completed",
             total    = len(jobs),
@@ -353,7 +376,10 @@ class LinkedInAgent:
     async def _run(self, page: Page, f: FiltersConfig) -> list[LinkedInScrapedJob]:
         """Navigate directly to LinkedIn Jobs search — no login step."""
         search_url = self._build_search_url(f, start=0)
+        logger.info("search_url_generated", source="linkedin", url=search_url)
         logger.info("linkedin_navigating_to_jobs", url=search_url)
+
+        await _screenshot(page, "01_before_search")
 
         try:
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
@@ -363,9 +389,13 @@ class LinkedInAgent:
 
         await page.wait_for_timeout(3_000)
 
-        # Check for redirect to login — profile session missing or expired
+        page_title  = await page.title()
         current_url = page.url
+        logger.info("search_page_opened", source="linkedin", url=current_url, title=page_title)
+
+        # Check for redirect to login — profile session missing or expired
         if any(p in current_url for p in _GATED_PATHS):
+            await _screenshot(page, "linkedin_gated_redirect")
             logger.error(
                 "linkedin_not_authenticated",
                 url  = current_url,
@@ -374,8 +404,9 @@ class LinkedInAgent:
             )
             return []
 
+        logger.info("results_page_loaded", source="linkedin", url=current_url, title=page_title)
         logger.info("linkedin_session_active", url=current_url)
-        await _screenshot(page, "linkedin_jobs_page")
+        await _screenshot(page, "02_after_search")
         return await self._paginate_and_collect(page, f)
 
     async def _paginate_and_collect(
@@ -432,11 +463,20 @@ class LinkedInAgent:
             if page_num == 0:
                 await _screenshot(page, "linkedin_jobs_page")
 
+            logger.info("waiting_for_results", source="linkedin", page=page_num + 1, url=page.url)
             try:
                 await page.wait_for_load_state("networkidle", timeout=20_000)
             except Exception:
                 await _delay(page, 2_000, 3_000)
 
+            page_title_now = await page.title()
+            logger.info(
+                "results_page_loaded",
+                source = "linkedin",
+                page   = page_num + 1,
+                url    = page.url,
+                title  = page_title_now,
+            )
             self._check_blocked(page.url)
             await self._dismiss_overlays(page)
 
@@ -446,8 +486,7 @@ class LinkedInAgent:
 
             await self._scroll_results(page)
 
-            if page_num == 0:
-                await _screenshot(page, "linkedin_search_results")
+            await _screenshot(page, f"linkedin_page_{page_num + 1:02d}_results")
 
             remaining = safety_cap - len(all_jobs)
             page_jobs = await self._extract_cards(page, remaining, seen_urls)
@@ -456,6 +495,7 @@ class LinkedInAgent:
                 empty_pages += 1
                 logger.info("linkedin_page_empty", page=page_num + 1, consecutive_empty=empty_pages)
                 if empty_pages >= 2:
+                    logger.info("next_page_not_found", source="linkedin", page=page_num + 1, reason="consecutive_empty_pages")
                     break
             else:
                 empty_pages = 0
@@ -464,12 +504,14 @@ class LinkedInAgent:
                     if url and url not in seen_urls:
                         seen_urls.add(url)
                         all_jobs.append(j)
+                logger.info("next_page_found", source="linkedin", page=page_num + 1, jobs_this_page=len(page_jobs))
 
             logger.info("linkedin_page_done", page=page_num + 1, page_new=len(page_jobs), total=len(all_jobs))
-            logger.info("linkedin_page_processed", page=page_num + 1, jobs_this_page=len(page_jobs), total_collected=len(all_jobs))
+            logger.info("page_processed", source="linkedin", page=page_num + 1, jobs_this_page=len(page_jobs), total_collected=len(all_jobs))
             page_num += 1
             await _delay(page, 1_500, 2_500)   # polite inter-page delay
 
+        logger.info("pagination_completed", source="linkedin", pages=page_num, total=len(all_jobs))
         logger.info("linkedin_pagination_complete", pages=page_num, total=len(all_jobs))
         return all_jobs
 
@@ -533,16 +575,21 @@ class LinkedInAgent:
     # ── Scrolling ──────────────────────────────────────────────────────────────
 
     async def _scroll_results(self, page: Page) -> None:
-        container = None
+        container     = None
+        matched_sel   = None
         for sel in _Sel.CONTAINER:
             try:
                 el = await page.query_selector(sel)
                 if el:
-                    container = el
-                    logger.debug("linkedin_container_found", selector=sel)
+                    container   = el
+                    matched_sel = sel
+                    logger.info("jobs_container_found", source="linkedin", selector=sel)
                     break
             except Exception:
                 continue
+
+        if not container:
+            logger.info("jobs_container_not_found", source="linkedin", selectors_tried=_Sel.CONTAINER)
 
         if container:
             prev_h = -1
@@ -576,24 +623,33 @@ class LinkedInAgent:
         if seen_urls is None:
             seen_urls = set()
 
+        matched_card_sel = None
         for sel in _Sel.CARD:
             try:
-                await page.wait_for_selector(sel, timeout=10_000)
-                logger.debug("linkedin_card_selector_matched", selector=sel)
+                await page.wait_for_selector(sel, timeout=5_000)
+                matched_card_sel = sel
+                logger.info("linkedin_card_selector_matched", selector=sel)
                 break
             except Exception:
+                logger.info("linkedin_selector_timeout", selector=sel)
                 continue
 
         raw: list[ElementHandle] = []
         for sel in _Sel.CARD:
-            raw = await page.query_selector_all(sel)
-            if raw:
-                logger.info("linkedin_cards_found", selector=sel, count=len(raw))
-                logger.info("linkedin_jobs_found", count=len(raw))
+            found = await page.query_selector_all(sel)
+            cnt   = len(found)
+            logger.info("linkedin_selector_tried", selector=sel, count=cnt)
+            if found:
+                raw = found
+                logger.info("job_cards_found_count", source="linkedin", selector=sel, count=cnt)
+                logger.info("linkedin_cards_found", selector=sel, count=cnt)
+                logger.info("linkedin_jobs_found", count=cnt)
                 break
 
         if not raw:
+            await _screenshot(page, "linkedin_no_cards")
             await _save_html(page, "linkedin_no_cards")
+            logger.warning("linkedin_job_cards_not_found", source="linkedin", selectors_tried=_Sel.CARD)
             logger.warning("linkedin_no_cards_found")
             return []
 
@@ -653,6 +709,7 @@ class LinkedInAgent:
                 employment_type = _clean(detail_data.get("emp_type", "")),
                 source          = "LinkedIn",
             ))
+            logger.info("job_card_extracted", source="linkedin", index=idx, title=title, company=company, url=url)
             logger.debug("linkedin_job_parsed", index=idx, title=title, company=company)
 
         logger.info("linkedin_extraction_complete", count=len(jobs))

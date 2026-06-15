@@ -19,7 +19,7 @@ from app.models.harvest_models import FiltersConfig
 logger = structlog.get_logger(__name__)
 
 _DICE_SEARCH_URL = "https://www.dice.com/jobs"
-_DEBUG_DIR       = Path("debug")
+_DEBUG_DIR       = Path("data/debug/dice")
 
 _DATE_MAP: dict[int, str] = {
     24:  "ONE",
@@ -308,27 +308,33 @@ class DiceScraper:
 
         for sel in _Sel.CARD:
             try:
-                await self._page.wait_for_selector(sel, timeout=8_000)
-                logger.debug("dice_card_selector_matched", selector=sel)
+                await self._page.wait_for_selector(sel, timeout=5_000)
+                logger.info("dice_card_selector_matched", selector=sel)
                 break
             except Exception:
+                logger.info("dice_selector_timeout", selector=sel)
                 continue
 
         raw: list[ElementHandle] = []
         for sel in _Sel.CARD:
-            raw = await self._page.query_selector_all(sel)
-            if raw:
-                logger.info("dice_cards_found", selector=sel, count=len(raw))
+            found = await self._page.query_selector_all(sel)
+            cnt   = len(found)
+            logger.info("dice_selector_tried", selector=sel, count=cnt)
+            if found:
+                raw = found
+                logger.info("job_cards_found_count", source="dice", selector=sel, count=cnt)
+                logger.info("dice_cards_found", selector=sel, count=cnt)
                 break
 
         if not raw:
+            await _screenshot(self._page, "dice_no_cards")
             await _save_html(self._page, "dice_no_cards")
+            logger.warning("dice_job_cards_not_found", source="dice", selectors_tried=_Sel.CARD)
             logger.warning("dice_no_cards_found_falling_back_to_js")
             return await self._js_extract_jobs(remaining, seen_urls)
 
         parsed = await self._parse_card_elements(raw, remaining, seen_urls)
         if not parsed:
-            # Cards found but all failed CSS extraction — likely Shadow DOM; use JS path
             logger.warning("dice_css_parse_empty_falling_back_to_js", cards=len(raw))
             return await self._js_extract_jobs(remaining, seen_urls)
         return parsed
@@ -405,6 +411,9 @@ class DiceScraper:
         logger.info("pagination_started", source="dice", safety_cap=safety_cap)
 
         while len(all_jobs) < safety_cap:
+            page_url = self._build_search_url(self._filters, page_num)
+            logger.info("search_url_generated", source="dice", page=page_num, url=page_url)
+
             try:
                 await self.search_jobs(page_num)
             except RuntimeError as exc:
@@ -413,9 +422,16 @@ class DiceScraper:
                 logger.warning("dice_page_nav_failed", page=page_num, error=str(exc))
                 break
 
-            if page_num == 1:
-                await _screenshot(self._page, "dice_search_results")
-                logger.info("dice_jobs_page_opened", url=self._page.url)
+            page_title = await self._page.title()
+            logger.info("search_page_opened", source="dice", page=page_num, url=self._page.url, title=page_title)
+            logger.info("waiting_for_results", source="dice", page=page_num, url=self._page.url)
+
+            # wait_for_load_state("load") already called inside search_jobs → apply_filters
+            page_title = await self._page.title()
+            logger.info("results_page_loaded", source="dice", page=page_num, url=self._page.url, title=page_title)
+
+            await _screenshot(self._page, f"dice_page_{page_num:02d}_results")
+            logger.info("dice_jobs_page_opened", url=self._page.url)
 
             remaining  = safety_cap - len(all_jobs)
             page_jobs  = await self.extract_job_cards(remaining, seen_urls)
@@ -424,6 +440,7 @@ class DiceScraper:
                 empty_pages += 1
                 logger.info("dice_page_empty", page=page_num, consecutive_empty=empty_pages)
                 if empty_pages >= 2:
+                    logger.info("next_page_not_found", source="dice", page=page_num, reason="consecutive_empty_pages")
                     break
             else:
                 empty_pages = 0
@@ -432,16 +449,20 @@ class DiceScraper:
                     if url and url not in seen_urls:
                         seen_urls.add(url)
                         all_jobs.append(j)
+                logger.info("next_page_found", source="dice", page=page_num, jobs_this_page=len(page_jobs))
 
             logger.info("dice_page_done", page=page_num, page_new=len(page_jobs), total=len(all_jobs))
             logger.info("page_processed", source="dice", page=page_num, jobs_this_page=len(page_jobs), total_collected=len(all_jobs))
 
-            if not await self.paginate(page_num):
+            has_next = await self.paginate(page_num)
+            if not has_next:
+                logger.info("next_page_not_found", source="dice", page=page_num, reason="next_button_disabled")
                 break
 
             page_num += 1
             await _delay(self._page, 400, 700)
 
+        logger.info("pagination_completed", source="dice", pages=page_num, total=len(all_jobs))
         logger.info("dice_harvest_complete", pages=page_num, total=len(all_jobs))
         logger.info("jobs_found", source="dice", total=len(all_jobs))
         return all_jobs
@@ -550,10 +571,13 @@ class DiceScraper:
                 el = await self._page.query_selector(sel)
                 if el:
                     container = el
-                    logger.debug("dice_container_found", selector=sel)
+                    logger.info("jobs_container_found", source="dice", selector=sel)
                     break
             except Exception:
                 continue
+
+        if not container:
+            logger.info("jobs_container_not_found", source="dice", selectors_tried=_Sel.CONTAINER)
 
         if container:
             prev_h = -1
@@ -614,7 +638,7 @@ class DiceScraper:
 
             work_mode = _infer_work_mode(work_type + " " + location)
 
-            return DiceScrapedJob(
+            job = DiceScrapedJob(
                 job_title       = title,
                 company         = company,
                 location        = location,
@@ -628,6 +652,8 @@ class DiceScraper:
                 employment_type = emp_type,
                 source          = "Dice",
             )
+            logger.info("job_card_extracted", source="dice", title=title, company=company, url=job_url)
+            return job
         except Exception as exc:
             logger.debug("dice_card_parse_error", error=str(exc))
             return None

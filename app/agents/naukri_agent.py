@@ -36,6 +36,8 @@ from app.scrapers.browser_manager import PersistentBrowserManager
 
 logger = structlog.get_logger(__name__)
 
+_DEBUG_DIR = Path("data/debug/naukri")
+
 
 # ── Filter → URL param maps ───────────────────────────────────────────────────
 
@@ -347,6 +349,18 @@ class NaukriAgent:
         chrome_profile = ConfigService().load().browser.chrome_profile
 
         logger.info(
+            "config_loaded",
+            source              = "naukri",
+            keyword             = filters.keyword,
+            location            = filters.location,
+            job_type            = filters.job_type,
+            work_mode           = filters.work_mode,
+            domain              = getattr(filters, "domain", "Any"),
+            search_window_hours = filters.search_window_hours,
+            max_jobs            = filters.max_jobs,
+            chrome_profile      = chrome_profile,
+        )
+        logger.info(
             "naukri_search_started",
             keyword        = filters.keyword,
             location       = filters.location,
@@ -364,9 +378,10 @@ class NaukriAgent:
                 page = await pbm.new_page()
                 jobs = await self._run(page, filters)
             logger.info("naukri_jobs_extracted", total=len(jobs))
+            logger.info("agent_completed", source="naukri", total=len(jobs))
             return jobs
         except Exception as exc:
-            logger.exception("naukri_harvest_error", error=str(exc))
+            logger.exception("agent_failed", source="naukri", error=str(exc))
             return []
 
     # ── Internal flow ──────────────────────────────────────────────────────────
@@ -406,6 +421,7 @@ class NaukriAgent:
 
         while len(all_jobs) < safety_cap:
             search_url = self._build_search_url(f, page_no=page_num)
+            logger.info("search_url_generated", source="naukri", page=page_num, url=search_url)
             logger.info("naukri_page_start", page=page_num, collected=len(all_jobs))
 
             try:
@@ -421,18 +437,21 @@ class NaukriAgent:
             self._check_blocked(page.url)
             await self._dismiss_overlays(page)
 
-            # domcontentloaded already loaded the cards; skip slow networkidle wait
+            page_title = await page.title()
+            logger.info("search_page_opened", source="naukri", page=page_num, url=page.url, title=page_title)
+
+            logger.info("waiting_for_results", source="naukri", page=page_num, url=page.url)
             try:
                 await page.wait_for_load_state("load", timeout=8_000)
             except Exception:
                 await _delay(page, 500, 800)
 
+            page_title = await page.title()
+            logger.info("results_page_loaded", source="naukri", page=page_num, url=page.url, title=page_title)
             self._check_blocked(page.url)
             await self._dismiss_overlays(page)
 
-            if page_num == 1:
-                logger.info("naukri_results_page_loaded", url=page.url)
-                await self._screenshot(page, "naukri_results_page")
+            await self._screenshot(page, f"naukri_page_{page_num:02d}")
 
             await self._scroll_results(page)
 
@@ -443,6 +462,7 @@ class NaukriAgent:
                 empty_pages += 1
                 logger.info("naukri_page_empty", page=page_num, consecutive_empty=empty_pages)
                 if empty_pages >= 2:
+                    logger.info("next_page_not_found", source="naukri", page=page_num, reason="consecutive_empty_pages")
                     break
             else:
                 empty_pages = 0
@@ -451,12 +471,14 @@ class NaukriAgent:
                     if url and url not in seen_urls:
                         seen_urls.add(url)
                         all_jobs.append(j)
+                logger.info("next_page_found", source="naukri", page=page_num, jobs_this_page=len(page_jobs))
 
             logger.info("naukri_page_done", page=page_num, page_new=len(page_jobs), total=len(all_jobs))
             logger.info("page_processed", source="naukri", page=page_num, jobs_this_page=len(page_jobs), total_collected=len(all_jobs))
             page_num += 1
             await _delay(page, 400, 700)
 
+        logger.info("pagination_completed", source="naukri", pages=page_num - 1, total=len(all_jobs))
         logger.info("naukri_pagination_complete", pages=page_num - 1, total=len(all_jobs))
         logger.info("jobs_found", source="naukri", total=len(all_jobs))
         return all_jobs
@@ -501,10 +523,13 @@ class NaukriAgent:
                 el = await page.query_selector(sel)
                 if el:
                     container = el
-                    logger.debug("naukri_container_found", selector=sel)
+                    logger.info("jobs_container_found", source="naukri", selector=sel)
                     break
             except Exception:
                 continue
+
+        if not container:
+            logger.info("jobs_container_not_found", source="naukri", selectors_tried=_Sel.CONTAINER)
 
         if container:
             prev_h = -1
@@ -540,20 +565,27 @@ class NaukriAgent:
 
         for sel in _Sel.CARD:
             try:
-                await page.wait_for_selector(sel, timeout=10_000)
-                logger.debug("naukri_card_selector_matched", selector=sel)
+                await page.wait_for_selector(sel, timeout=5_000)
+                logger.info("naukri_card_selector_matched", selector=sel)
                 break
             except Exception:
+                logger.info("naukri_selector_timeout", selector=sel)
                 continue
 
         raw: list[ElementHandle] = []
         for sel in _Sel.CARD:
-            raw = await page.query_selector_all(sel)
-            if raw:
-                logger.info("naukri_cards_found", selector=sel, count=len(raw))
+            found = await page.query_selector_all(sel)
+            cnt   = len(found)
+            logger.info("naukri_selector_tried", selector=sel, count=cnt)
+            if found:
+                raw = found
+                logger.info("job_cards_found_count", source="naukri", selector=sel, count=cnt)
+                logger.info("naukri_cards_found", selector=sel, count=cnt)
                 break
 
         if not raw:
+            await self._screenshot(page, "naukri_no_cards")
+            logger.warning("naukri_job_cards_not_found", source="naukri", selectors_tried=_Sel.CARD)
             logger.warning("naukri_no_cards_found_css_selectors_falling_back_to_js")
             return await self._js_extract_jobs(page, remaining, seen_urls)
 
@@ -708,7 +740,7 @@ class NaukriAgent:
             if clean_url and not clean_url.startswith("http"):
                 clean_url = f"https://www.naukri.com{clean_url}"
 
-            return NaukriScrapedJob(
+            job = NaukriScrapedJob(
                 job_title       = title,
                 company         = company,
                 location        = location,
@@ -721,6 +753,8 @@ class NaukriAgent:
                 work_mode       = _infer_work_mode(location),
                 source          = "Naukri",
             )
+            logger.info("job_card_extracted", source="naukri", title=title, company=company, url=clean_url)
+            return job
         except Exception as exc:
             logger.debug("naukri_card_parse_error", error=str(exc))
             return None
@@ -765,10 +799,10 @@ class NaukriAgent:
 
     async def _screenshot(self, page: Page, label: str) -> None:
         try:
+            _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
             ts   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            path = Path("data/results/naukri") / f"{label}_{ts}.png"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            await page.screenshot(path=str(path), full_page=True)
+            path = _DEBUG_DIR / f"{label}_{ts}.png"
+            await page.screenshot(path=str(path), full_page=False)
             logger.info("naukri_screenshot_saved", path=str(path))
         except Exception as exc:
             logger.debug("naukri_screenshot_failed", error=str(exc))

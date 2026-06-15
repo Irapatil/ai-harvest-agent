@@ -40,6 +40,18 @@ class DiceAgent:
         chrome_profile = ConfigService().load().browser.chrome_profile
 
         logger.info(
+            "config_loaded",
+            source              = "dice",
+            keyword             = filters.keyword,
+            location            = filters.location,
+            job_type            = filters.job_type,
+            work_mode           = filters.work_mode,
+            domain              = getattr(filters, "domain", "Any"),
+            search_window_hours = filters.search_window_hours,
+            max_jobs            = filters.max_jobs,
+            chrome_profile      = chrome_profile,
+        )
+        logger.info(
             "dice_agent_started",
             keyword        = filters.keyword,
             location       = filters.location,
@@ -58,8 +70,9 @@ class DiceAgent:
                 scraper = DiceScraper(page, filters)
                 jobs    = await scraper.run()
             logger.info("dice_harvest_complete", total=len(jobs))
+            logger.info("agent_completed", source="dice", total=len(jobs))
             return jobs
         except Exception as exc:
-            logger.exception("dice_harvest_error", error=str(exc))
+            logger.exception("agent_failed", source="dice", error=str(exc))
             return []
 
