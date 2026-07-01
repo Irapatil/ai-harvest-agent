@@ -1,14 +1,11 @@
-# Environment & secrets
+# ── Environment & Secrets ─────────────────────────────────────────────────────
 .env
 .env.local
+.env.production
 *.env
+!.env.example
 
-# Virtual environment
-.venv/
-venv/
-env/
-
-# Python cache
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
@@ -18,33 +15,74 @@ __pycache__/
 dist/
 build/
 
-# Pytest / coverage
+# ── Virtual Environment ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Pytest / Coverage ─────────────────────────────────────────────────────────
 .pytest_cache/
 .coverage
 htmlcov/
+.mypy_cache/
 
-# Session & credentials (sensitive runtime files)
-data/config/linkedin_session.json
+# ── Browser Sessions & Chrome Profiles (sensitive runtime data) ───────────────
+data/sessions/*.json
+data/chrome_profile/
+data/chrome_profile_test/
+data/chrome_profile_test2/
+data/chrome_profile*/
+storage_state/
+*.json.lock
 
-# Harvest results (generated data)
+# ── Generated Harvest Results (runtime output — never commit) ─────────────────
 data/results/
+data/debug/
 
-# Debug screenshots / artifacts
-debug/
+# ── Generated Root-Level Status & Result Files ────────────────────────────────
+harvest_result.json
+harvest_job_status.txt
+prospect_result.json
+prospect_job_status.txt
 
-# Logs
+# ── Prospect Input Files (may contain personal data) ─────────────────────────
+data/prospects/input/
+!data/prospects/input/.gitkeep
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
 *.log
 server.err
 server_stderr.log
 server_stdout.log
+uvicorn_out.txt
+uvicorn_err.txt
+logs/
 
-# IDE / OS
+# ── Playwright Debug Artifacts ────────────────────────────────────────────────
+playwright-report/
+test-results/
+debug/
+
+# ── IDE & OS ──────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
-*.DS_Store
+.DS_Store
 Thumbs.db
+~$*
 
-# Database files
+# ── Database ──────────────────────────────────────────────────────────────────
 *.db
 *.sqlite
 *.sqlite3
+
+# ── Generated Documents & Temp Files ─────────────────────────────────────────
+data/*.docx
+data/*.xlsx
+data/*.csv
+~*.tmp
+*.tmp
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+output/
+exports/
+reports/

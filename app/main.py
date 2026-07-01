@@ -1,15 +1,19 @@
 """FastAPI application factory and lifespan."""
 from __future__ import annotations
-
 import asyncio
+import io
 import sys
 import structlog
+
+# Force UTF-8 on Windows: prevents charmap encode errors when job titles/descriptions
+# contain characters outside cp1252 (e.g. ‑ non-breaking hyphen).
+if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
 from app.config import get_settings
 from app.core.exceptions import HarvestException, harvest_exception_handler
 from app.core.middleware import LoggingMiddleware, RateLimitMiddleware
@@ -19,6 +23,8 @@ from app.routes.linkedin_routes import router as linkedin_agent_router
 from app.routes.naukri_routes import router as naukri_agent_router
 from app.routes.dice_routes import router as dice_agent_router
 from app.routes.run_harvest_agent import router as run_harvest_agent_router
+from app.routes.prospect_routes import router as prospect_intelligence_router
+from app.routes.recruiter_routes import router as recruiter_discovery_router
 from app.services.playwright_service import PlaywrightService
 from app.services.scheduler_service import SchedulerService
 
@@ -142,11 +148,13 @@ def create_app() -> FastAPI:
     app.include_router(linkedin_harvest.router,  prefix=f"{prefix}/jobs/linkedin",  tags=["LinkedIn Harvest"], include_in_schema=False)
 
     # ── Public endpoints (Swagger-visible) ────────────────────────────────────
-    app.include_router(run_harvest_agent_router)  # POST /run-harvest-agent  ← unified trigger
-    app.include_router(linkedin_agent_router)     # POST /run-linkedin-agent  +  results endpoints
-    app.include_router(harvest_agent_router)      # POST /run-harvest  +  management endpoints
-    app.include_router(naukri_agent_router)       # POST /run-naukri-agent  +  results endpoints
-    app.include_router(dice_agent_router)         # POST /run-dice-agent  +  dice results endpoints
+    app.include_router(run_harvest_agent_router)      # POST /run-harvest-agent  ← unified trigger
+    app.include_router(linkedin_agent_router)         # POST /run-linkedin-agent  +  results endpoints
+    app.include_router(harvest_agent_router)          # POST /run-harvest  +  management endpoints
+    app.include_router(naukri_agent_router)           # POST /run-naukri-agent  +  results endpoints
+    app.include_router(dice_agent_router)             # POST /run-dice-agent  +  dice results endpoints
+    app.include_router(prospect_intelligence_router)  # POST /run-prospect-intelligence
+    app.include_router(recruiter_discovery_router)    # POST /run-recruiter-discovery
 
     return app
 

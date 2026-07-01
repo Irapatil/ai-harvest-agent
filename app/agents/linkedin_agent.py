@@ -94,6 +94,10 @@ class LinkedInScrapedJob:
     company_url:     str       = ""
     employment_type: str       = ""
     source:          str       = "LinkedIn"
+    # Lead intelligence
+    job_poster_name:        str | None = None
+    job_poster_designation: str | None = None
+    linkedin_profile_url:   str | None = None
 
 
 # ── CSS selector fallback chains ──────────────────────────────────────────────
@@ -166,23 +170,90 @@ class _Sel:
     ]
 
     # Card list-view fields
-    TITLE:    list[str] = ["a.job-card-list__title", "h3.base-search-card__title", "h3", "h2"]
-    COMPANY:  list[str] = ["a.job-card-container__company-name", "h4.base-search-card__subtitle", "h4 a", "h4"]
-    LOCATION: list[str] = ["span.job-card-container__metadata-item", "span.job-search-card__location", "[class*='location']"]
-    LINK:     list[str] = ["a.job-card-list__title", "a.base-card__full-link", "a[href*='/jobs/view/']"]
+    TITLE:    list[str] = [
+        "a.job-card-list__title--link",     # authenticated 2024+
+        "a.job-card-list__title",
+        "strong a",
+        "[class*='job-card-list__title']",
+        "h3.base-search-card__title",
+        "h3",
+        "h2",
+    ]
+    COMPANY:  list[str] = [
+        "span.job-card-container__primary-description",  # authenticated 2024+
+        ".job-card-container__primary-description",      # without tag qualifier
+        "a.job-card-container__company-name",
+        ".job-card-container__company-name",
+        ".artdeco-entity-lockup__subtitle",              # newer LinkedIn structure
+        "h4.base-search-card__subtitle",
+        "h4 a",
+        "h4",
+    ]
+    LOCATION: list[str] = [
+        "span.job-card-container__metadata-item",
+        "li.job-card-container__metadata-item",
+        ".job-card-container__metadata-wrapper",
+        "span.job-search-card__location",
+        "[class*='metadata-item']",
+        "[class*='location']",
+    ]
+    LINK:     list[str] = [
+        "a.job-card-list__title--link",     # authenticated 2024+
+        "a.job-card-list__title",
+        "a.base-card__full-link",
+        "a[href*='/jobs/view/']",
+    ]
     POSTED:   list[str] = ["time", "span.job-search-card__listdate", "[class*='listdate']"]
 
     # Detail panel (opened after clicking a card)
     DETAIL_PANEL:      list[str] = ["#job-details", "div.jobs-description", "article.jobs-description"]
     DETAIL_TITLE:      list[str] = [".jobs-unified-top-card__job-title", "h1.jobs-unified-top-card__job-title", "h1"]
-    DETAIL_COMPANY:    list[str] = [".jobs-unified-top-card__company-name a", ".jobs-unified-top-card__company-name", "a[data-tracking-control-name='public_jobs_topcard-org-name']"]
-    DETAIL_COMPANY_URL: list[str] = [".jobs-unified-top-card__company-name a"]
-    DETAIL_LOCATION:   list[str] = [".jobs-unified-top-card__bullet", ".jobs-unified-top-card__workplace-type", ".topcard__flavor"]
+    DETAIL_COMPANY:    list[str] = [
+        ".job-details-jobs-unified-top-card__company-name a",   # authenticated 2024+ with prefix
+        ".job-details-jobs-unified-top-card__company-name",
+        ".jobs-unified-top-card__company-name a",
+        ".jobs-unified-top-card__company-name",
+        "a[data-tracking-control-name='public_jobs_topcard-org-name']",
+        "a[href*='/company/']",
+    ]
+    DETAIL_COMPANY_URL: list[str] = [
+        ".job-details-jobs-unified-top-card__company-name a",
+        ".jobs-unified-top-card__company-name a",
+        "a[href*='/company/']",
+    ]
+    DETAIL_LOCATION:   list[str] = [
+        ".job-details-jobs-unified-top-card__primary-description",  # authenticated 2024+
+        ".jobs-unified-top-card__primary-description",
+        ".jobs-unified-top-card__bullet",
+        ".jobs-unified-top-card__workplace-type",
+        ".topcard__flavor",
+    ]
     DETAIL_POSTED:     list[str] = ["span.jobs-unified-top-card__posted-date", ".topcard__flavor--metadata time", "time"]
     DETAIL_EMP_TYPE:   list[str] = [".jobs-unified-top-card__job-insight span", ".jobs-unified-top-card__workplace-type"]
     DETAIL_SALARY:     list[str] = [".jobs-unified-top-card__job-insight--highlight", "[class*='salary']", "[class*='compensation']"]
     DETAIL_SKILLS:     list[str] = [".job-details-skill-match-status-list li", ".jobs-unified-top-card__job-insight ul li"]
     DETAIL_DESC:       list[str] = ["#job-details", "div.jobs-description__content", "div.jobs-description"]
+
+    # "Meet the hiring team" recruiter card (visible when authenticated)
+    RECRUITER_NAME: list[str] = [
+        ".hirer-card .artdeco-entity-lockup__title a",
+        ".hirer-card .artdeco-entity-lockup__title",
+        ".jobs-poster__name",
+        ".hirer-card__hirer-information a",
+        "[class*='hirer-card'] a[href*='/in/']",
+    ]
+    RECRUITER_TITLE: list[str] = [
+        ".hirer-card .artdeco-entity-lockup__subtitle",
+        ".jobs-poster__occupation",
+        ".hirer-card__hirer-information span",
+        "[class*='hirer-card'] span.t-14",
+    ]
+    RECRUITER_URL: list[str] = [
+        ".hirer-card .artdeco-entity-lockup__title a",
+        ".hirer-card a[href*='/in/']",
+        ".jobs-poster__name a",
+        "[class*='hirer-card'] a[href*='linkedin.com/in/']",
+    ]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -356,6 +427,7 @@ class LinkedInAgent:
             logger.exception("agent_failed", source="linkedin", error=str(exc))
             return []
 
+        logger.info("linkedin_jobs_received", count=len(jobs))
         logger.info(
             "agent_completed",
             source   = "linkedin",
@@ -376,10 +448,11 @@ class LinkedInAgent:
     async def _run(self, page: Page, f: FiltersConfig) -> list[LinkedInScrapedJob]:
         """Navigate directly to LinkedIn Jobs search — no login step."""
         search_url = self._build_search_url(f, start=0)
+        logger.info("search_started", source="linkedin", keyword=f.keyword, location=f.location)
         logger.info("search_url_generated", source="linkedin", url=search_url)
         logger.info("linkedin_navigating_to_jobs", url=search_url)
 
-        await _screenshot(page, "01_before_search")
+        await _screenshot(page, "page_loaded")
 
         try:
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
@@ -396,18 +469,42 @@ class LinkedInAgent:
         # Check for redirect to login — profile session missing or expired
         if any(p in current_url for p in _GATED_PATHS):
             await _screenshot(page, "linkedin_gated_redirect")
-            logger.error(
+            logger.warning(
                 "linkedin_not_authenticated",
                 url  = current_url,
                 hint = "Chrome profile has no LinkedIn session. "
                        "Call POST /linkedin-setup-session to log in.",
             )
-            return []
+            # Retry once: navigate to linkedin.com home first, then to job search
+            logger.info("linkedin_auth_retry", attempt=1)
+            try:
+                await page.goto("https://www.linkedin.com/", wait_until="domcontentloaded", timeout=20_000)
+                await page.wait_for_timeout(2_000)
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
+                await page.wait_for_timeout(3_000)
+                page_title  = await page.title()
+                current_url = page.url
+                logger.info("search_page_opened", source="linkedin", url=current_url, title=page_title)
+            except Exception as exc:
+                logger.error("linkedin_auth_retry_failed", error=str(exc))
+                return []
+
+            if any(p in current_url for p in _GATED_PATHS):
+                logger.error(
+                    "linkedin_not_authenticated",
+                    url  = current_url,
+                    hint = "LinkedIn requires authentication. "
+                           "Call POST /linkedin-setup-session to log in once.",
+                )
+                logger.info("linkedin_jobs_returned", count=0, reason="authwall")
+                return []
 
         logger.info("results_page_loaded", source="linkedin", url=current_url, title=page_title)
         logger.info("linkedin_session_active", url=current_url)
         await _screenshot(page, "02_after_search")
-        return await self._paginate_and_collect(page, f)
+        jobs = await self._paginate_and_collect(page, f)
+        logger.info("linkedin_jobs_returned", count=len(jobs))
+        return jobs
 
     async def _paginate_and_collect(
         self, page: Page, f: FiltersConfig
@@ -513,6 +610,31 @@ class LinkedInAgent:
 
         logger.info("pagination_completed", source="linkedin", pages=page_num, total=len(all_jobs))
         logger.info("linkedin_pagination_complete", pages=page_num, total=len(all_jobs))
+
+        # ── Checkpoint 1: cumulative raw jobs ─────────────────────────────────
+        logger.info("linkedin_jobs_extracted", count=len(all_jobs), pages_scraped=page_num)
+        try:
+            import json as _json_p
+            _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+            raw_dump = [
+                {
+                    "job_title": j.job_title, "company": j.company,
+                    "location": j.location, "job_url": j.job_url,
+                    "posted_date": j.posted_date,
+                    "job_poster_name": j.job_poster_name,
+                    "linkedin_profile_url": j.linkedin_profile_url,
+                }
+                for j in all_jobs
+            ]
+            (_DEBUG_DIR / "linkedin_raw_jobs.json").write_text(
+                _json_p.dumps({"stage": "pagination_complete", "count": len(all_jobs), "jobs": raw_dump},
+                              indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            logger.info("linkedin_raw_jobs_saved", path=str(_DEBUG_DIR / "linkedin_raw_jobs.json"), count=len(all_jobs))
+        except Exception as _exc:
+            logger.debug("linkedin_raw_jobs_save_failed", error=str(_exc))
+
         return all_jobs
 
 
@@ -651,8 +773,11 @@ class LinkedInAgent:
             await _save_html(page, "linkedin_no_cards")
             logger.warning("linkedin_job_cards_not_found", source="linkedin", selectors_tried=_Sel.CARD)
             logger.warning("linkedin_no_cards_found")
+            logger.info("linkedin_cards_found", count=0)
             return []
 
+        await _screenshot(page, "cards_found")
+        logger.info("linkedin_cards_found", count=len(raw), selector=matched_card_sel)
         return await self._parse_cards_with_detail(page, raw, remaining, seen_urls)
 
     async def _parse_cards_with_detail(
@@ -662,6 +787,7 @@ class LinkedInAgent:
         remaining: int,
         seen_urls: set[str],
     ) -> list[LinkedInScrapedJob]:
+        import json as _json
         jobs: list[LinkedInScrapedJob] = []
 
         for idx, card_el in enumerate(raw):
@@ -692,26 +818,58 @@ class LinkedInAgent:
                 detail_data.get("emp_type", "") + " " + location
             )
 
-            jobs.append(LinkedInScrapedJob(
-                job_title       = _clean(title),
-                company         = _clean(company),
-                location        = _clean(location),
-                salary          = _clean(detail_data.get("salary", "")) or "Not Disclosed",
-                experience      = "Not Specified",
-                posted_date     = _format_posted(
+            job = LinkedInScrapedJob(
+                job_title               = _clean(title),
+                company                 = _clean(company),
+                location                = _clean(location),
+                salary                  = _clean(detail_data.get("salary", "")) or "Not Disclosed",
+                experience              = "Not Specified",
+                posted_date             = _format_posted(
                     detail_data.get("posted") or list_data.get("posted") or ""
                 ),
-                job_url         = url,
-                job_description = detail_data.get("description", ""),
-                skills          = detail_data.get("skills", []),
-                work_mode       = work_mode,
-                company_url     = detail_data.get("company_url", ""),
-                employment_type = _clean(detail_data.get("emp_type", "")),
-                source          = "LinkedIn",
-            ))
+                job_url                 = url,
+                job_description         = detail_data.get("description", ""),
+                skills                  = detail_data.get("skills", []),
+                work_mode               = work_mode,
+                company_url             = detail_data.get("company_url", ""),
+                employment_type         = _clean(detail_data.get("emp_type", "")),
+                source                  = "LinkedIn",
+                job_poster_name         = detail_data.get("recruiter_name") or None,
+                job_poster_designation  = detail_data.get("recruiter_title") or None,
+                linkedin_profile_url    = detail_data.get("recruiter_url") or None,
+            )
+            jobs.append(job)
+            logger.info(
+                "linkedin_job_extracted",
+                source  = "linkedin",
+                index   = idx,
+                title   = title,
+                company = company,
+                url     = url,
+                recruiter = detail_data.get("recruiter_name"),
+            )
             logger.info("job_card_extracted", source="linkedin", index=idx, title=title, company=company, url=url)
-            logger.debug("linkedin_job_parsed", index=idx, title=title, company=company)
 
+        # Save raw jobs JSON artifact
+        try:
+            _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+            raw_data = [
+                {
+                    "title": j.job_title, "company": j.company, "location": j.location,
+                    "url": j.job_url, "posted_date": j.posted_date,
+                    "job_poster_name": j.job_poster_name,
+                    "linkedin_profile_url": j.linkedin_profile_url,
+                }
+                for j in jobs
+            ]
+            (_DEBUG_DIR / "linkedin_raw_jobs.json").write_text(
+                _json.dumps(raw_data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            logger.info("linkedin_raw_jobs_saved", path=str(_DEBUG_DIR / "linkedin_raw_jobs.json"), count=len(jobs))
+        except Exception as exc:
+            logger.debug("linkedin_raw_jobs_save_failed", error=str(exc))
+
+        logger.info("linkedin_jobs_combined", count=len(jobs))
         logger.info("linkedin_extraction_complete", count=len(jobs))
         return jobs
 
@@ -720,9 +878,24 @@ class LinkedInAgent:
         try:
             title = _clean(await _first_text(el, _Sel.TITLE))
             if not title:
+                # Log inner text snippet for debugging selector mismatches
+                try:
+                    snippet = (await el.inner_text())[:120].replace("\n", " ")
+                    logger.debug("linkedin_card_no_title", snippet=snippet)
+                except Exception:
+                    pass
                 return None
-            href      = await _first_attr(el, _Sel.LINK, "href")
+
+            href = await _first_attr(el, _Sel.LINK, "href")
+            # Fallback: build URL from data-occludable-job-id attribute
+            if not href:
+                job_id = await el.get_attribute("data-occludable-job-id")
+                if job_id:
+                    href = f"https://www.linkedin.com/jobs/view/{job_id}/"
             clean_url = href.split("?")[0] if href else ""
+            if clean_url.startswith("/"):
+                clean_url = "https://www.linkedin.com" + clean_url
+
             return {
                 "title":    title,
                 "company":  _clean(await _first_text(el, _Sel.COMPANY)),
@@ -744,13 +917,14 @@ class LinkedInAgent:
             await card_el.scroll_into_view_if_needed()
             await _delay(page, 300, 600)
             await card_el.click(force=True)
-            await _delay(page, 1_500, 2_500)
+            await _delay(page, 1_200, 2_000)
+            logger.info("job_opened", source="linkedin", index=idx, url=page.url)
 
-            # Wait for detail panel
+            # Wait for detail panel — 2 s per selector (reduced from 8 s to keep runs fast)
             panel_found = False
             for sel in _Sel.DETAIL_PANEL:
                 try:
-                    await page.wait_for_selector(sel, timeout=8_000)
+                    await page.wait_for_selector(sel, timeout=2_000)
                     panel_found = True
                     logger.debug("linkedin_detail_panel_found", selector=sel, idx=idx)
                     break
@@ -799,7 +973,43 @@ class LinkedInAgent:
                     continue
             detail["skills"] = skills[:20]
 
+            # Recruiter / "Meet the hiring team" (visible when authenticated)
+            recruiter = await self._extract_recruiter(page)
+            detail.update(recruiter)
+
         except Exception as exc:
             logger.debug("linkedin_detail_panel_error", idx=idx, error=str(exc))
 
         return detail
+
+    async def _extract_recruiter(self, page: Page) -> dict:
+        """Extract recruiter / hiring manager info from the detail panel."""
+        result: dict = {}
+        try:
+            name = await _first_text(page, _Sel.RECRUITER_NAME)
+            if name:
+                result["recruiter_name"] = _clean(name)
+                logger.info("poster_found", source="linkedin", name=result["recruiter_name"])
+
+            title_text = await _first_text(page, _Sel.RECRUITER_TITLE)
+            if title_text:
+                result["recruiter_title"] = _clean(title_text)
+                logger.info("designation_found", source="linkedin",
+                            designation=result["recruiter_title"])
+
+            url = await _first_attr(page, _Sel.RECRUITER_URL, "href")
+            if url and "/in/" in url:
+                result["recruiter_url"] = url.split("?")[0]
+                logger.info("linkedin_url_found", source="linkedin",
+                            linkedin_url=result["recruiter_url"])
+
+            if result.get("recruiter_name"):
+                logger.info(
+                    "linkedin_recruiter_found",
+                    name  = result.get("recruiter_name"),
+                    title = result.get("recruiter_title"),
+                    url   = result.get("recruiter_url"),
+                )
+        except Exception as exc:
+            logger.debug("linkedin_recruiter_extract_error", error=str(exc))
+        return result

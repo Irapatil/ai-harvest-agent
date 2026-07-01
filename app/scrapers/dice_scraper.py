@@ -58,6 +58,13 @@ class DiceScrapedJob:
     work_mode:       str       = "not_specified"
     employment_type: str       = ""
     source:          str       = "Dice"
+    # Lead intelligence
+    recruiter_name:         str | None = None
+    recruiter_company:      str | None = None
+    job_poster_designation: str | None = None
+    email_id:               str | None = None
+    contact_number:         str | None = None
+    linkedin_profile_url:   str | None = None
 
 
 class _Sel:
@@ -154,6 +161,53 @@ class _Sel:
         "button.modal-close",
         "button:has-text('Close')",
         "div[role='dialog'] button[aria-label='close']",
+    ]
+    # Recruiter / contact (rarely present on Dice card list view)
+    RECRUITER_NAME: list[str] = [
+        "[data-testid='recruiter-name']",
+        "span[class*='recruiter']",
+        "[class*='hiring-manager']",
+    ]
+    RECRUITER_EMAIL: list[str] = [
+        "a[href^='mailto:']",
+        "[data-testid='recruiter-email']",
+    ]
+    RECRUITER_PHONE: list[str] = [
+        "a[href^='tel:']",
+        "[data-testid='recruiter-phone']",
+    ]
+
+    # ── Detail page — recruiter fields (navigate to job URL) ─────────────────
+    DETAIL_RECRUITER_NAME: list[str] = [
+        "[data-testid='recruiter-name']",
+        "div[class*='recruiter'] h3",
+        "div[class*='recruiter'] span",
+        "[class*='hiring-manager'] span",
+        "[class*='hiringManager'] span",
+        "section[class*='recruiter'] h3",
+        "[data-cy='recruiter-name']",
+    ]
+    DETAIL_RECRUITER_DESIGNATION: list[str] = [
+        "[data-testid='recruiter-title']",
+        "div[class*='recruiter'] p",
+        "[class*='recruiter'] [class*='title']",
+        "[class*='recruiter'] [class*='role']",
+        "[data-cy='recruiter-title']",
+    ]
+    DETAIL_EMAIL: list[str] = [
+        "a[href^='mailto:']",
+        "[data-testid='recruiter-email'] a",
+        "[class*='contact'] a[href^='mailto:']",
+    ]
+    DETAIL_PHONE: list[str] = [
+        "a[href^='tel:']",
+        "[data-testid='recruiter-phone'] a",
+        "[class*='contact'] a[href^='tel:']",
+    ]
+    DETAIL_LINKEDIN: list[str] = [
+        "a[href*='linkedin.com/in/']",
+        "[data-testid='recruiter-linkedin']",
+        "[class*='recruiter'] a[href*='linkedin.com']",
     ]
 
 
@@ -465,7 +519,119 @@ class DiceScraper:
         logger.info("pagination_completed", source="dice", pages=page_num, total=len(all_jobs))
         logger.info("dice_harvest_complete", pages=page_num, total=len(all_jobs))
         logger.info("jobs_found", source="dice", total=len(all_jobs))
+
+        # ── Lead enrichment: visit every Dice job detail page ────────────────
+        all_jobs = await self._enrich_leads_batch(all_jobs)
+
         return all_jobs
+
+    async def _enrich_leads_batch(self, jobs: list[DiceScrapedJob], max_enrich: int = 200) -> list[DiceScrapedJob]:
+        """
+        Second pass: open Dice job detail URLs and extract recruiter contact.
+        Capped at max_enrich visits to keep run times reasonable.
+        Uses regex extraction from page text — more reliable than CSS selectors
+        since recruiter info appears inconsistently across Dice job postings.
+        """
+        import re as _re
+
+        _EMAIL_RE   = _re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
+        _PHONE_RE   = _re.compile(r'(?:\+?1[\s\-.]?)?\(?[2-9]\d{2}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}')
+        _LI_RE      = _re.compile(r'https?://(?:www\.)?linkedin\.com/in/([a-zA-Z0-9\-_%]+)/?')
+
+        candidates = [j for j in jobs if j.job_url]
+        to_visit   = candidates[:max_enrich]
+        total      = len(jobs)
+        enriched   = 0
+        logger.info("dice_lead_enrichment_started", total=total, visiting=len(to_visit), cap=max_enrich)
+
+        for idx, job in enumerate(to_visit):
+            if not job.job_url:
+                continue
+            try:
+                await self._page.goto(job.job_url, wait_until="domcontentloaded", timeout=20_000)
+                await _delay(self._page, 400, 700)
+                logger.info("job_opened", source="dice", index=idx, url=job.job_url)
+                await self._dismiss_overlays()
+
+                # ── CSS selector pass for named recruiter fields ──────────────
+                name  = _clean(await _first_text(self._page, _Sel.DETAIL_RECRUITER_NAME)) or None
+                desig = _clean(await _first_text(self._page, _Sel.DETAIL_RECRUITER_DESIGNATION)) or None
+
+                # ── href-based contact extraction ─────────────────────────────
+                email_href = await _first_attr(self._page, _Sel.DETAIL_EMAIL, "href")
+                email = email_href.replace("mailto:", "").strip() if email_href else None
+
+                phone_href = await _first_attr(self._page, _Sel.DETAIL_PHONE, "href")
+                phone = phone_href.replace("tel:", "").strip() if phone_href else None
+
+                li_href = await _first_attr(self._page, _Sel.DETAIL_LINKEDIN, "href")
+                li_url  = li_href.split("?")[0] if li_href and "/in/" in li_href else None
+
+                # ── Regex extraction from full page text (catches anything CSS missed)
+                if not (email and phone and li_url):
+                    try:
+                        page_text = await self._page.inner_text("body")
+                        if not email:
+                            m = _EMAIL_RE.search(page_text)
+                            if m:
+                                found = m.group()
+                                _JUNK = ("noreply", "no-reply", "dice.com", "example.", "reportfraud",
+                                         "fraud@", "abuse@", "careers@", "jobs@", "donotreply")
+                                if not any(x in found.lower() for x in _JUNK):
+                                    email = found
+                        if not phone:
+                            m = _PHONE_RE.search(page_text)
+                            if m:
+                                phone = m.group().strip()
+                        if not li_url:
+                            m = _LI_RE.search(page_text)
+                            if m:
+                                li_url = m.group().split("?")[0]
+                    except Exception:
+                        pass
+
+                # ── Apply to job record ───────────────────────────────────────
+                changed = False
+                if name:
+                    job.recruiter_name = name
+                    if not job.recruiter_company:
+                        job.recruiter_company = job.company
+                    logger.info("recruiter_found", source="dice", name=name, index=idx)
+                    changed = True
+                if desig:
+                    job.job_poster_designation = desig
+                    logger.info("designation_found", source="dice", designation=desig, index=idx)
+                    changed = True
+                if email:
+                    job.email_id = email
+                    logger.info("email_found", source="dice", email=email, index=idx)
+                    changed = True
+                if phone:
+                    job.contact_number = phone
+                    logger.info("phone_found", source="dice", phone=phone, index=idx)
+                    changed = True
+                if li_url:
+                    job.linkedin_profile_url = li_url
+                    logger.info("linkedin_found", source="dice", url=li_url, index=idx)
+                    changed = True
+
+                if changed:
+                    enriched += 1
+                    logger.info(
+                        "lead_record_created",
+                        source = "dice",
+                        index  = idx,
+                        name   = name,
+                        email  = email,
+                        phone  = phone,
+                        li_url = li_url,
+                    )
+
+            except Exception as exc:
+                logger.debug("dice_lead_enrich_failed", index=idx, url=job.job_url, error=str(exc))
+
+        logger.info("dice_lead_enrichment_complete", total=total, enriched=enriched)
+        return jobs
 
     # ── Private helpers ────────────────────────────────────────────────────────
 
@@ -488,30 +654,20 @@ class DiceScraper:
 
     async def _dismiss_overlays(self) -> None:
         # ── Step 1: ConsentManager / cookie consent ────────────────────────────
-        # Wait up to 5 s for the banner to appear (loaded async from external CDN)
-        for sel in _Sel.COOKIE:
-            try:
-                el = self._page.locator(sel).first
-                if await el.is_visible(timeout=5_000):
-                    await el.click()
-                    await _delay(self._page, 600, 900)
-                    logger.debug("dice_cookie_dismissed", selector=sel)
-                    break
-            except Exception:
-                continue
-
-        # JS fallback — handles ConsentManager injected UI and shadow DOM
+        # JS-direct click is the most reliable approach (bypasses Playwright
+        # viewport/focus/clickability checks that may fail for fixed overlays).
         try:
-            clicked = await self._page.evaluate("""
+            dismissed = await self._page.evaluate("""
                 () => {
-                    // ConsentManager-specific accept button classes
+                    // ConsentManager-specific accept button classes (dice.com CMP)
                     const cmpBtns = document.querySelectorAll(
                         '.cmpboxbtnyes, .cmp-accept-btn, [class*="cmpbtnyes"], [id*="cmpbntyesall"]'
                     );
                     for (const b of cmpBtns) { b.click(); return true; }
 
-                    // Generic text patterns
-                    const patterns = ['allow all', 'accept all', 'accept cookies', 'i accept', 'agree', 'ok'];
+                    // Generic text-match on ALL buttons (case-insensitive)
+                    const patterns = ['allow all', 'accept all', 'accept cookies',
+                                      'i accept', 'agree', 'ok', 'got it'];
                     for (const btn of document.querySelectorAll('button')) {
                         if (patterns.includes(btn.textContent.trim().toLowerCase())) {
                             btn.click();
@@ -521,10 +677,53 @@ class DiceScraper:
                     return false;
                 }
             """)
-            if clicked:
-                await _delay(self._page, 600, 900)
+            if dismissed:
+                await _delay(self._page, 800, 1_200)
+                logger.debug("dice_cookie_dismissed", method="js_click")
         except Exception:
             pass
+
+        # ── Nuclear fallback: hide the consent overlay via CSS if click fails ──
+        # This ensures the full viewport is used for card rendering and scrolling.
+        try:
+            hidden = await self._page.evaluate("""
+                () => {
+                    // Find the fixed/absolute overlay containing the consent banner
+                    for (const btn of document.querySelectorAll('button')) {
+                        if (btn.textContent.trim().toLowerCase() !== 'allow all') continue;
+                        let node = btn;
+                        for (let i = 0; i < 12; i++) {
+                            node = node.parentElement;
+                            if (!node) break;
+                            const s = window.getComputedStyle(node);
+                            if (s.position === 'fixed' || s.position === 'absolute') {
+                                node.style.setProperty('display', 'none', 'important');
+                                return true;
+                            }
+                        }
+                        // Fallback: hide closest named consent container
+                        const c = btn.closest('[class*="consent"],[class*="cookie"],[class*="cmp"],[class*="gdpr"]');
+                        if (c) { c.style.setProperty('display', 'none', 'important'); return true; }
+                    }
+                    return false;
+                }
+            """)
+            if hidden:
+                logger.debug("dice_cookie_hidden_via_css")
+        except Exception:
+            pass
+
+        # ── Playwright locator click (still attempt it for real interaction) ───
+        for sel in _Sel.COOKIE:
+            try:
+                el = self._page.locator(sel).first
+                if await el.is_visible(timeout=2_000):
+                    await el.click()
+                    await _delay(self._page, 400, 700)
+                    logger.debug("dice_cookie_dismissed", method="locator", selector=sel)
+                    break
+            except Exception:
+                continue
 
         # ── Step 2: Dice login modal / any dialog overlay ─────────────────────
         # Dice.com shows a "Make your next move" login overlay on search pages
@@ -621,12 +820,15 @@ class DiceScraper:
         try:
             title = _clean(await _first_text(el, _Sel.TITLE))
             if not title:
+                logger.debug("dice_card_no_title", note="all TITLE selectors returned empty; card skipped")
                 return None
 
             href     = await _first_attr(el, _Sel.LINK, "href")
             job_url  = href if href and href.startswith("http") else (
                 f"https://www.dice.com{href}" if href else ""
             )
+            if not job_url:
+                logger.debug("dice_card_no_url", title=title, note="LINK selectors returned no href")
 
             company     = _clean(await _first_text(el, _Sel.COMPANY))  or "Unknown Company"
             location    = _clean(await _first_text(el, _Sel.LOCATION)) or "Not Specified"
@@ -638,20 +840,33 @@ class DiceScraper:
 
             work_mode = _infer_work_mode(work_type + " " + location)
 
+            recruiter_name = _clean(await _first_text(el, _Sel.RECRUITER_NAME)) or None
+            email_raw      = await _first_attr(el, _Sel.RECRUITER_EMAIL, "href")
+            email_id       = email_raw.replace("mailto:", "").strip() if email_raw else None
+            phone_raw      = await _first_attr(el, _Sel.RECRUITER_PHONE, "href")
+            contact_number = phone_raw.replace("tel:", "").strip() if phone_raw else None
+
             job = DiceScrapedJob(
-                job_title       = title,
-                company         = company,
-                location        = location,
-                salary          = "Not Disclosed",
-                experience      = "Not Specified",
-                posted_date     = _format_posted(posted_raw),
-                job_url         = job_url,
-                job_description = description,
-                skills          = skills[:15],
-                work_mode       = work_mode,
-                employment_type = emp_type,
-                source          = "Dice",
+                job_title              = title,
+                company                = company,
+                location               = location,
+                salary                 = "Not Disclosed",
+                experience             = "Not Specified",
+                posted_date            = _format_posted(posted_raw),
+                job_url                = job_url,
+                job_description        = description,
+                skills                 = skills[:15],
+                work_mode              = work_mode,
+                employment_type        = emp_type,
+                source                 = "Dice",
+                recruiter_name         = recruiter_name,
+                recruiter_company      = company if recruiter_name else None,
+                job_poster_designation = None,
+                email_id               = email_id,
+                contact_number         = contact_number,
+                linkedin_profile_url   = None,
             )
+            logger.info("job_found", source="dice", title=title, company=company, url=job_url)
             logger.info("job_card_extracted", source="dice", title=title, company=company, url=job_url)
             return job
         except Exception as exc:

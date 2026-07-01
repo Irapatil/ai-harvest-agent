@@ -54,22 +54,36 @@ class UnifiedJob:
     # "pending" | "verified" | "not_verified" | "career_page_not_found" | "skipped"
     verification_status: str = "pending"
 
+    # ── Lead Intelligence (populated by source agents, optional) ─────────────
+    job_poster_name:        str | None = None   # Recruiter / Hiring Manager name
+    job_poster_designation: str | None = None   # Recruiter title / designation
+    linkedin_profile_url:   str | None = None   # Recruiter LinkedIn profile URL
+    current_company:        str | None = None   # Recruiter's current company
+    email_id:               str | None = None   # Recruiter email
+    contact_number:         str | None = None   # Recruiter phone / mobile
+
     def to_dict(self) -> dict[str, Any]:
         return {
-            "job_title":           self.job_title,
-            "company":             self.company,
-            "location":            self.location,
-            "salary":              self.salary,
-            "experience":          self.experience,
-            "posted_date":         self.posted_date,
-            "job_url":             self.job_url,
-            "job_description":     self.job_description,
-            "skills":              self.skills,
-            "work_mode":           self.work_mode,
-            "source":              self.source,
-            "job_type":            self.job_type,
-            "domain":              self.domain,
-            "hiring_entity":       self.hiring_entity,
-            "is_gcc":              self.is_gcc,
-            "verification_status": self.verification_status,
+            "job_title":              self.job_title,
+            "company":                self.company,
+            "location":               self.location,
+            "salary":                 self.salary,
+            "experience":             self.experience,
+            "posted_date":            self.posted_date,
+            "job_url":                self.job_url,
+            "job_description":        self.job_description,
+            "skills":                 self.skills,
+            "work_mode":              self.work_mode,
+            "source":                 self.source,
+            "job_type":               self.job_type,
+            "domain":                 self.domain,
+            "hiring_entity":          self.hiring_entity,
+            "is_gcc":                 self.is_gcc,
+            "verification_status":    self.verification_status,
+            "job_poster_name":        self.job_poster_name,
+            "job_poster_designation": self.job_poster_designation,
+            "linkedin_profile_url":   self.linkedin_profile_url,
+            "current_company":        self.current_company,
+            "email_id":               self.email_id,
+            "contact_number":         self.contact_number,
         }

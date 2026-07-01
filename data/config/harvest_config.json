@@ -10,7 +10,7 @@
     "job_type": "Any",
     "work_mode": "Any",
     "search_window_hours": 24,
-    "max_jobs": 50,
+    "max_jobs": 0,
     "domain": "Any",
     "hiring_entity": "Any",
     "gcc_mode": "include_gcc",

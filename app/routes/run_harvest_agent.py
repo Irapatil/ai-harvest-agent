@@ -261,26 +261,43 @@ async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -
         combined_path  = result.combined_path,
     )
 
-    source_counts = {
-        f"{src.lower()}_jobs": len(jobs)
-        for src, jobs in result.jobs_by_source.items()
-    }
+    lead_records = sum(
+        1 for j in result.all_jobs
+        if j.job_poster_name or j.email_id or j.contact_number
+    )
+
+    elapsed_seconds = (result.completed_at - result.started_at).total_seconds()
 
     return {
+        # ── Identity ────────────────────────────────────────────────────────────
         "run_id":           run_id,
         "status":           status_str,
         "sources_executed": result.sources_executed,
-        **source_counts,
+        # ── Per-source job counts ────────────────────────────────────────────────
+        "linkedin_jobs":    len(result.jobs_by_source.get("LinkedIn", [])),
+        "naukri_jobs":      len(result.jobs_by_source.get("Naukri", [])),
+        "dice_jobs":        len(result.jobs_by_source.get("Dice", [])),
+        "combined_jobs":    result.total_jobs,
         "total_jobs":       result.total_jobs,
         "jobs_found":       result.total_jobs,
+        # ── Lead intelligence ────────────────────────────────────────────────────
+        "lead_records":     lead_records,
+        # ── Business filter breakdown ────────────────────────────────────────────
         "direct_clients":   result.direct_clients,
         "gcc":              result.gcc,
         "staffing_firms":   result.staffing_firms,
         "ambiguous":        result.ambiguous,
         "verified_jobs":    result.verified_jobs,
-        "combined_path":    result.combined_path,
+        # ── Output artefacts ─────────────────────────────────────────────────────
+        "excel_generated":  bool(result.excel_path),
+        "excel_path":       result.excel_path,
+        "json_path":        result.combined_path,
+        "excel_file":       result.excel_path,   # backward-compat alias
+        "json_file":        result.combined_path, # backward-compat alias
         "saved_to":         "data/results",
         "filters_applied":  filters_snap,
+        # ── Timing ──────────────────────────────────────────────────────────────
+        "runtime_minutes":  round(elapsed_seconds / 60, 1),
     }
 
 
