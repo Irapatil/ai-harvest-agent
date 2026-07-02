@@ -1,42 +1,43 @@
 """
-POST /run-harvest-agent — unified harvest trigger.
+POST /run-harvest-agent — unified harvest trigger (async / background).
+GET  /harvest-status/{job_id} — live status polling.
 
 Design contract
 ───────────────
-• Request body accepts ONLY {} or {"config_id": "active"}.
-• No search criteria, keywords, locations, job types, or salary values
-  are accepted in the request.  All harvesting parameters come exclusively
-  from the saved harvest_config.json written by the UI Rule Engine.
-• The endpoint is a pure execution trigger: load config → run → report.
+• POST accepts ONLY {} or {"config_id": "active"}.  No search criteria.
+  All harvesting parameters come from harvest_config.json.
+• The endpoint returns HTTP 202 immediately with a job_id.
+  The harvest runs in the background and can be polled via GET /harvest-status/{job_id}.
 
-Execution flow
-──────────────
+Execution flow (background task)
+────────────────────────────────
 1. Load harvest_config.json  (config_service)
 2. Determine enabled sources
-3. Run sources in priority order: Naukri → LinkedIn → Dice
+3. Run sources in priority order: Naukri → LinkedIn → Dice  (via OrchestratorAgent)
 4. Apply business filters (domain / hiring entity / GCC / salary / work mode)
 5. Run company verification if enabled
 6. Save per-source result files to data/results/<source>/
 7. Update data/results/run_history/run_history.json
-8. Return execution summary
+8. Mark job complete in JobTracker
 
-Response
-────────
+Response (202)
+──────────────
 {
-    "run_id":           "20260601_143000",
-    "status":           "success",
-    "sources_executed": ["Naukri", "LinkedIn"],
-    "jobs_found":       25,
-    "verified_jobs":    0,
-    "saved_to":         "data/results"
+    "job_id":  "a1b2c3d4...",
+    "status":  "running",
+    "message": "Harvest started in background"
 }
+
+Poll GET /harvest-status/{job_id} for progress and final results.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, status
@@ -47,6 +48,7 @@ from app.agents.orchestrator_agent import OrchestratorAgent, OrchestratorResult
 from app.core.proactor import needs_proactor, run_in_proactor
 from app.models.unified_job import UnifiedJob
 from app.services.config_service import ConfigService
+from app.services.job_tracker import JobTracker
 from app.services.run_history_service import RunHistoryService
 
 logger = structlog.get_logger(__name__)
@@ -138,13 +140,128 @@ def _save_source_results(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Background harvest task
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _run_harvest_background(
+    job_id:   str,
+    run_id:   str,
+    config:   Any,
+    now_iso:  str,
+    enabled:  list[str],
+) -> None:
+    """Runs the full harvest in a background asyncio task, updating JobTracker."""
+    log = logger.bind(job_id=job_id, run_id=run_id, sources=enabled)
+    log.info("harvest_background_start")
+
+    JobTracker.update(job_id, progress=10, message="Starting orchestrator")
+
+    orch = OrchestratorAgent(config)
+
+    try:
+        if needs_proactor():
+            log.debug("using_proactor_thread")
+            result: OrchestratorResult = await run_in_proactor(orch.run_all)
+        else:
+            result = await orch.run_all()
+    except Exception as exc:
+        log.exception("harvest_background_error", error=str(exc))
+        _history_svc.append(
+            RunHistoryService.make_entry(
+                run_id       = run_id,
+                sources      = enabled,
+                started_at   = datetime.now(timezone.utc),
+                completed_at = datetime.now(timezone.utc),
+                status       = "failed",
+                jobs_found   = 0,
+            )
+        )
+        JobTracker.update(
+            job_id,
+            status       = "failed",
+            progress     = 100,
+            message      = f"Harvest failed: {exc}",
+            error        = str(exc),
+            completed_at = datetime.now(timezone.utc).isoformat(),
+        )
+        return
+
+    JobTracker.update(
+        job_id,
+        progress = 70,
+        message  = "Saving results",
+        linkedin = len(result.jobs_by_source.get("LinkedIn", [])),
+        naukri   = len(result.jobs_by_source.get("Naukri",   [])),
+        dice     = len(result.jobs_by_source.get("Dice",     [])),
+        combined = result.total_jobs,
+    )
+
+    # ── Save per-source result files ──────────────────────────────────────────
+    filters_snap = _filters_snapshot(config)
+
+    for source, jobs in result.jobs_by_source.items():
+        try:
+            _save_source_results(run_id, now_iso, source, jobs, filters_snap)
+        except Exception as exc:
+            log.warning("source_save_failed", source=source, error=str(exc))
+
+    # ── Update run history ────────────────────────────────────────────────────
+    status_str = "success" if result.total_jobs > 0 else "no_results"
+    history_entry = RunHistoryService.make_entry(
+        run_id          = run_id,
+        sources         = result.sources_executed,
+        started_at      = result.started_at,
+        completed_at    = result.completed_at,
+        status          = status_str,
+        jobs_found      = result.total_jobs,
+        verified_jobs   = result.verified_jobs,
+        direct_clients  = result.direct_clients,
+        gcc             = result.gcc,
+        staffing_firms  = result.staffing_firms,
+        ambiguous       = result.ambiguous,
+    )
+    try:
+        _history_svc.append(history_entry)
+    except Exception as exc:
+        log.warning("history_save_failed", error=str(exc))
+
+    elapsed_seconds = (result.completed_at - result.started_at).total_seconds()
+    log.info(
+        "harvest_completed",
+        run_id         = run_id,
+        total          = result.total_jobs,
+        verified       = result.verified_jobs,
+        direct_clients = result.direct_clients,
+        gcc            = result.gcc,
+        staffing_firms = result.staffing_firms,
+        ambiguous      = result.ambiguous,
+        sources        = result.sources_executed,
+        runtime_min    = round(elapsed_seconds / 60, 1),
+        combined_path  = result.combined_path,
+    )
+
+    JobTracker.update(
+        job_id,
+        status       = status_str,
+        progress     = 100,
+        message      = f"Harvest complete — {result.total_jobs} jobs found",
+        completed_at = result.completed_at.isoformat(),
+        excel_path   = result.excel_path   or "",
+        json_path    = result.combined_path or "",
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # POST /run-harvest-agent
 # ══════════════════════════════════════════════════════════════════════════════
 
-@router.post("/run-harvest-agent", status_code=status.HTTP_200_OK)
+@router.post("/run-harvest-agent", status_code=status.HTTP_202_ACCEPTED)
 async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -> Any:
     """
     Trigger a full harvest run from the current harvest_config.json settings.
+
+    Returns immediately (HTTP 202) with a `job_id`.
+    Poll **GET /harvest-status/{job_id}** for live progress and final results.
 
     All search filters (keyword, location, job_type, work_mode, domain,
     hiring_entity, GCC mode, salary, verification) are read from the saved
@@ -178,127 +295,59 @@ async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -
             "Enable at least one source (linkedin, naukri, or dice) in harvest_config.json",
         )
 
-    log = logger.bind(
+    job_id = uuid4().hex
+    JobTracker.create(job_id, run_id)
+
+    logger.info(
+        "harvest_agent_queued",
+        job_id    = job_id,
         run_id    = run_id,
-        config_id = body.config_id,
         sources   = enabled,
         keyword   = config.filters.keyword,
-    )
-    log.info("harvest_agent_start")
-    log.info(
-        "search_started",
-        run_id   = run_id,
-        sources  = enabled,
-        keyword  = config.filters.keyword,
-        location = config.filters.location,
-        job_type = config.filters.job_type,
+        config_id = body.config_id,
     )
 
-    # ── Run orchestrator ──────────────────────────────────────────────────────
-    orch = OrchestratorAgent(config)
+    asyncio.create_task(
+        _run_harvest_background(job_id, run_id, config, now_iso, enabled),
+        name = f"harvest-{job_id}",
+    )
 
-    try:
-        if needs_proactor():
-            log.debug("using_proactor_thread")
-            result: OrchestratorResult = await run_in_proactor(orch.run_all)
-        else:
-            result = await orch.run_all()
-    except Exception as exc:
-        log.exception("harvest_agent_error", error=str(exc))
-        _history_svc.append(
-            RunHistoryService.make_entry(
-                run_id       = run_id,
-                sources      = enabled,
-                started_at   = datetime.now(timezone.utc),
-                completed_at = datetime.now(timezone.utc),
-                status       = "failed",
-                jobs_found   = 0,
-            )
+    return JSONResponse(
+        status_code = status.HTTP_202_ACCEPTED,
+        content = {
+            "job_id":  job_id,
+            "run_id":  run_id,
+            "status":  "running",
+            "message": "Harvest started in background — poll GET /harvest-status/{job_id}",
+        },
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GET /harvest-status/{job_id}
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/harvest-status/{job_id}", status_code=status.HTTP_200_OK)
+async def get_harvest_status(job_id: str) -> Any:
+    """
+    Poll the status of a background harvest job.
+
+    Returns progress (0–100), per-source counts, and output file paths
+    once the harvest completes.
+
+    Possible `status` values:
+    - `running`    — harvest is in progress
+    - `success`    — harvest completed with results
+    - `no_results` — harvest completed but found no matching jobs
+    - `failed`     — harvest error (check `error` field)
+    """
+    js = JobTracker.get(job_id)
+    if js is None:
+        return JSONResponse(
+            status_code = 404,
+            content     = {"detail": f"No harvest job found with id '{job_id}'"},
         )
-        return _err("Harvest failed", str(exc) or "Unexpected scraping error")
-
-    # ── Save per-source result files ──────────────────────────────────────────
-    filters_snap = _filters_snapshot(config)
-    saved_paths: list[str] = []
-
-    for source, jobs in result.jobs_by_source.items():
-        try:
-            path = _save_source_results(run_id, now_iso, source, jobs, filters_snap)
-            saved_paths.append(path)
-        except Exception as exc:
-            log.warning("source_save_failed", source=source, error=str(exc))
-
-    # ── Update run history ────────────────────────────────────────────────────
-    status_str = "success" if result.total_jobs > 0 else "no_results"
-    history_entry = RunHistoryService.make_entry(
-        run_id          = run_id,
-        sources         = result.sources_executed,
-        started_at      = result.started_at,
-        completed_at    = result.completed_at,
-        status          = status_str,
-        jobs_found      = result.total_jobs,
-        verified_jobs   = result.verified_jobs,
-        direct_clients  = result.direct_clients,
-        gcc             = result.gcc,
-        staffing_firms  = result.staffing_firms,
-        ambiguous       = result.ambiguous,
-    )
-    try:
-        _history_svc.append(history_entry)
-    except Exception as exc:
-        log.warning("history_save_failed", error=str(exc))
-
-    log.info(
-        "harvest_completed",
-        run_id         = run_id,
-        total          = result.total_jobs,
-        verified       = result.verified_jobs,
-        direct_clients = result.direct_clients,
-        gcc            = result.gcc,
-        staffing_firms = result.staffing_firms,
-        ambiguous      = result.ambiguous,
-        sources        = result.sources_executed,
-        combined_path  = result.combined_path,
-    )
-
-    lead_records = sum(
-        1 for j in result.all_jobs
-        if j.job_poster_name or j.email_id or j.contact_number
-    )
-
-    elapsed_seconds = (result.completed_at - result.started_at).total_seconds()
-
-    return {
-        # ── Identity ────────────────────────────────────────────────────────────
-        "run_id":           run_id,
-        "status":           status_str,
-        "sources_executed": result.sources_executed,
-        # ── Per-source job counts ────────────────────────────────────────────────
-        "linkedin_jobs":    len(result.jobs_by_source.get("LinkedIn", [])),
-        "naukri_jobs":      len(result.jobs_by_source.get("Naukri", [])),
-        "dice_jobs":        len(result.jobs_by_source.get("Dice", [])),
-        "combined_jobs":    result.total_jobs,
-        "total_jobs":       result.total_jobs,
-        "jobs_found":       result.total_jobs,
-        # ── Lead intelligence ────────────────────────────────────────────────────
-        "lead_records":     lead_records,
-        # ── Business filter breakdown ────────────────────────────────────────────
-        "direct_clients":   result.direct_clients,
-        "gcc":              result.gcc,
-        "staffing_firms":   result.staffing_firms,
-        "ambiguous":        result.ambiguous,
-        "verified_jobs":    result.verified_jobs,
-        # ── Output artefacts ─────────────────────────────────────────────────────
-        "excel_generated":  bool(result.excel_path),
-        "excel_path":       result.excel_path,
-        "json_path":        result.combined_path,
-        "excel_file":       result.excel_path,   # backward-compat alias
-        "json_file":        result.combined_path, # backward-compat alias
-        "saved_to":         "data/results",
-        "filters_applied":  filters_snap,
-        # ── Timing ──────────────────────────────────────────────────────────────
-        "runtime_minutes":  round(elapsed_seconds / 60, 1),
-    }
+    return js.to_dict()
 
 
 # ══════════════════════════════════════════════════════════════════════════════

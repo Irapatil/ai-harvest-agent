@@ -23,8 +23,10 @@ from app.routes.linkedin_routes import router as linkedin_agent_router
 from app.routes.naukri_routes import router as naukri_agent_router
 from app.routes.dice_routes import router as dice_agent_router
 from app.routes.run_harvest_agent import router as run_harvest_agent_router
+from app.routes.frontend_routes import router as frontend_router
 from app.routes.prospect_routes import router as prospect_intelligence_router
 from app.routes.recruiter_routes import router as recruiter_discovery_router
+from app.services.job_tracker import JobTracker
 from app.services.playwright_service import PlaywrightService
 from app.services.scheduler_service import SchedulerService
 
@@ -36,6 +38,7 @@ settings = get_settings()
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup: launch browser pool + scheduler. Shutdown: clean up both."""
     logger.info("startup", env=settings.app_env, model=settings.anthropic_model)
+    JobTracker.load_from_disk()
 
     # ── Playwright pool (optional — demo routes create their own browser) ─────
     # On Windows with --reload, uvicorn forces SelectorEventLoop which cannot
@@ -155,6 +158,7 @@ def create_app() -> FastAPI:
     app.include_router(dice_agent_router)             # POST /run-dice-agent  +  dice results endpoints
     app.include_router(prospect_intelligence_router)  # POST /run-prospect-intelligence
     app.include_router(recruiter_discovery_router)    # POST /run-recruiter-discovery
+    app.include_router(frontend_router)               # GET /jobs, /lead-intelligence, /download/*
 
     return app
 
