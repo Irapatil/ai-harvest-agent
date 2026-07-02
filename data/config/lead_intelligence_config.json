@@ -1,0 +1,38 @@
+{
+  "search_sources": [
+    "linkedin",
+    "premium_naukri"
+  ],
+  "search_posts": true,
+  "fallback_to_premium_naukri": true,
+  "linkedin": {
+    "keywords": [
+      "hiring",
+      "we are hiring",
+      "looking for",
+      "open position",
+      "join our team",
+      "immediate joiners",
+      "urgently hiring",
+      "talent acquisition"
+    ],
+    "max_posts": 50,
+    "max_pages": 5,
+    "scroll_times": 8
+  },
+  "premium_naukri": {
+    "search_by_name": true,
+    "search_by_company": true,
+    "use_previous_companies": true,
+    "max_profiles": 3,
+    "open_profile_tabs": true
+  },
+  "validate_email": true,
+  "validate_phone": true,
+  "minimum_confidence": 0.70,
+  "output": {
+    "json": true,
+    "excel": true,
+    "crm_ready": true
+  }
+}

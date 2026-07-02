@@ -25,8 +25,11 @@ from app.routes.dice_routes import router as dice_agent_router
 from app.routes.run_harvest_agent import router as run_harvest_agent_router
 from app.routes.prospect_routes import router as prospect_intelligence_router
 from app.routes.recruiter_routes import router as recruiter_discovery_router
+from app.routes.frontend_routes import router as frontend_router
+from app.routes.lead_intelligence_routes import router as lead_intelligence_router
 from app.services.playwright_service import PlaywrightService
 from app.services.scheduler_service import SchedulerService
+from app.services.job_tracker import JobTracker
 
 logger   = structlog.get_logger(__name__)
 settings = get_settings()
@@ -36,6 +39,9 @@ settings = get_settings()
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup: launch browser pool + scheduler. Shutdown: clean up both."""
     logger.info("startup", env=settings.app_env, model=settings.anthropic_model)
+
+    # Restore any in-flight job states from the previous process
+    JobTracker.load_from_disk()
 
     # ── Playwright pool (optional — demo routes create their own browser) ─────
     # On Windows with --reload, uvicorn forces SelectorEventLoop which cannot
@@ -101,7 +107,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title        = "LinkedIn Harvest Agent",
+        title        = "AI Harvest Agent — Enterprise Job Intelligence Platform",
         version      = "1.0.0",
         description  = "",
         openapi_tags = [],
@@ -140,7 +146,7 @@ def create_app() -> FastAPI:
 
     # ── Internal routers — hidden from Swagger ────────────────────────────────
     prefix = settings.api_v1_prefix
-    app.include_router(health.router,            tags=["Health"],           include_in_schema=False)
+    app.include_router(health.router,            tags=["Health"])
     app.include_router(harvest.router,           prefix=f"{prefix}/harvest",        tags=["Harvest"],          include_in_schema=False)
     app.include_router(agents.router,            prefix=f"{prefix}/agents",         tags=["Agents"],           include_in_schema=False)
     app.include_router(tasks.router,             prefix=f"{prefix}/tasks",          tags=["Tasks"],            include_in_schema=False)
@@ -148,13 +154,15 @@ def create_app() -> FastAPI:
     app.include_router(linkedin_harvest.router,  prefix=f"{prefix}/jobs/linkedin",  tags=["LinkedIn Harvest"], include_in_schema=False)
 
     # ── Public endpoints (Swagger-visible) ────────────────────────────────────
-    app.include_router(run_harvest_agent_router)      # POST /run-harvest-agent  ← unified trigger
+    app.include_router(frontend_router)               # GET /jobs, /lead-intelligence, /download/*, /health
+    app.include_router(run_harvest_agent_router)      # POST /run-harvest-agent, GET /harvest-status/{id}, /run-history
     app.include_router(linkedin_agent_router)         # POST /run-linkedin-agent  +  results endpoints
     app.include_router(harvest_agent_router)          # POST /run-harvest  +  management endpoints
     app.include_router(naukri_agent_router)           # POST /run-naukri-agent  +  results endpoints
     app.include_router(dice_agent_router)             # POST /run-dice-agent  +  dice results endpoints
     app.include_router(prospect_intelligence_router)  # POST /run-prospect-intelligence
     app.include_router(recruiter_discovery_router)    # POST /run-recruiter-discovery
+    app.include_router(lead_intelligence_router)      # POST /run-lead-intelligence, GET /lead-intelligence, /download/lead-intelligence/*
 
     return app
 
