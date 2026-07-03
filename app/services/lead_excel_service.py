@@ -83,7 +83,7 @@ class LeadExcelService:
         # ── Summary sheet header block ─────────────────────────────────────────
         self._write_summary_block(ws, result, Font, PatternFill, Alignment)
 
-        header_row = 8  # summary takes rows 1-7; headers start at row 8
+        header_row = 9  # summary takes rows 1-8 (title + 7 data rows); headers start at row 9
 
         # ── Column headers ────────────────────────────────────────────────────
         header_font  = Font(bold=True, color="FFFFFF", size=10)

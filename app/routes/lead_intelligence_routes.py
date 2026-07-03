@@ -100,8 +100,9 @@ async def _run_lead_intelligence_background(
     _lead_jobs[job_id]["message"]  = "Running LinkedIn + Naukri pipeline…"
 
     try:
+        orch = LeadIntelligenceOrchestrator()
         result: LeadIntelligenceResult = await run_in_proactor(
-            LeadIntelligenceOrchestrator().run, request
+            lambda: orch.run(request)
         )
         _lead_jobs[job_id].update({
             "status":     "success",
